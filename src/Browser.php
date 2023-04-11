@@ -46,9 +46,10 @@ class Browser {
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
+        //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
-    private \SplObjectStorage $inprogress;
+    private \SplObjectStorage $inProgress;
 
     /**
      * @param EventLoop\LoopInterface|null $loop
@@ -59,7 +60,7 @@ class Browser {
             $this->loop = EventLoop\Loop::get();
         }
 
-        $this->inprogress = new \SplObjectStorage();
+        $this->inProgress = new \SplObjectStorage();
     }
 
     public function get(string $url, array $headers = []) : PromiseInterface {
@@ -80,7 +81,7 @@ class Browser {
             throw new \RuntimeException('Unable to create temporary file for response headers');
         }
         $fiber = $this->initFiber($curl);
-        $this->inprogress[$fiber] = [
+        $this->inProgress[$fiber] = [
             'deferred' => $deferred,
             'file' => $fileHandle,
             'headers' => $headerHandle,
@@ -89,7 +90,7 @@ class Browser {
         curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
 
         //Kickstart the handler any time we initiate a new request and no requests are currently in the queue
-        if (count($this->inprogress) === 1) {
+        if (count($this->inProgress) === 1) {
             $this->loop->futureTick($this->curlTick(...));
         }
 
@@ -153,12 +154,12 @@ class Browser {
             curl_multi_remove_handle($mh, $curl);
             curl_multi_close($mh);
 
-            $deferred = $this->inprogress[$fiber]['deferred'];
+            $deferred = $this->inProgress[$fiber]['deferred'];
             if ($info['result'] === CURLE_OK) {
-                $responseBodyHandle = $this->inprogress[$fiber]['file'];
+                $responseBodyHandle = $this->inProgress[$fiber]['file'];
                 stream_set_blocking($responseBodyHandle, false);
                 rewind($responseBodyHandle);
-                $responseHeaderHandle = $this->inprogress[$fiber]['headers'];
+                $responseHeaderHandle = $this->inProgress[$fiber]['headers'];
                 rewind($responseHeaderHandle);
                 $headers = stream_get_contents($responseHeaderHandle);
                 $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle)); //@TODO implement ReactPHP Browser withRejectErrorResponse support
@@ -174,15 +175,15 @@ class Browser {
 
     private function curlTick(): void
     {
-        foreach($this->inprogress as $fiber) {
+        foreach($this->inProgress as $fiber) {
             if ($fiber->isTerminated()) {
-                unset($this->inprogress[$fiber]);
+                unset($this->inProgress[$fiber]);
             } else {
                 $fiber->resume();
             }
         }
 
-        if (count($this->inprogress)) {
+        if (count($this->inProgress)) {
             $this->loop->addTimer(0.01, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
         }
     }
