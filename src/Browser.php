@@ -142,7 +142,6 @@ class Browser {
         }
 
         $fiber = new Fiber(function (CurlMultiHandle $mh) use(&$fiber) {
-            $still_running = null;
             do {
                 curl_multi_exec($mh, $still_running);
                 if ($still_running) {
