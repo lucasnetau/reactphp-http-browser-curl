@@ -200,11 +200,17 @@ class Browser {
         }
 
         $info = curl_getinfo($curl);
+        $info['appconnect_time'] = curl_getinfo($curl,CURLINFO_APPCONNECT_TIME);
         $timing = [];
-        foreach(['total_time',"namelookup_time", "connect_time", "pretransfer_time", "starttransfer_time", "redirect_time"] as $timingKey) {
+        foreach(["namelookup_time", "connect_time", "appconnect_time", "pretransfer_time", "redirect_time", "starttransfer_time", "total_time",] as $timingKey) {
             $timing[] = "$timingKey;dur=". $info[$timingKey];
         }
         $headers['ServerTiming'] = $timing;
+
+        $certs = $info['certinfo'] ?? [];
+        if (count($certs) > 0) {
+            $headers['X-Certificate'] = $certs[0]['Cert'];
+        }
 
         return new Psr7Response(
             curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
