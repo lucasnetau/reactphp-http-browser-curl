@@ -9,6 +9,7 @@ use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
+use React\Stream\ReadableResourceStream;
 use RingCentral\Psr7\Response as Psr7Response;
 
 use function count;
@@ -23,11 +24,15 @@ use function curl_multi_init;
 use function curl_multi_remove_handle;
 use function curl_multi_strerror;
 use function curl_setopt;
+use function curl_setopt_array;
 use function fopen;
+use function is_array;
 use function preg_split;
 use function rewind;
 use function stream_get_contents;
 use function stream_set_blocking;
+use function strtolower;
+use function strtoupper;
 
 class Browser {
     protected bool $disableCurlCache = false;
@@ -49,6 +54,10 @@ class Browser {
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
+    protected array $defaultHeaders = [
+        'User-Agent' => 'EdgeTelemetricsBrowser/1',
+    ];
+
     private \SplObjectStorage $inProgress;
 
     /**
@@ -63,38 +72,75 @@ class Browser {
         $this->inProgress = new \SplObjectStorage();
     }
 
+    public function head(string $url, array $headers = []) : PromiseInterface {
+        return $this->request('HEAD',$url,$headers);
+    }
+
     public function get(string $url, array $headers = []) : PromiseInterface {
+        return $this->request('GET',$url,$headers);
+    }
+
+    public function post(string $url, array $headers = [], $body = '') : PromiseInterface {
+        return $this->request('POST',$url,$headers, $body);
+    }
+
+    public function put(string $url, array $headers = [], $body = '') : PromiseInterface {
+        return $this->request('PUT',$url,$headers, $body);
+    }
+
+    public function options(string $url, array $headers = []) : PromiseInterface {
+        return $this->request('OPTIONS',$url,$headers);
+    }
+
+    public function patch(string $url, array $headers = [], $body = '') : PromiseInterface {
+        return $this->request('PATCH',$url,$headers, $body);
+    }
+
+    public function delete(string $url, array $headers = [], $body = '') : PromiseInterface {
+        return $this->request('DELETE',$url,$headers, $body);
+    }
+
+    public function requestStreaming($method, $url, array $headers = [], $body = ''): PromiseInterface {
+        return $this->request($method, $url, $headers, $body);
+    }
+
+    /**
+     * @param $method
+     * @param $url
+     * @param array $headers
+     * @param $body
+     * @return PromiseInterface
+     */
+    public function request($method, $url, array $headers = [], $body = ''): PromiseInterface
+    {
         $curl = $this->initCurl();
-        curl_setopt($curl, CURLOPT_URL, $url);
+
+        if ($body instanceof ReadableResourceStream ) {
+            throw new \RuntimeException('Support not implemented');
+        }
+
+        $method = strtoupper($method);
+        $curl_opts = match($method) {
+            'HEAD' => [ CURLOPT_NOBODY => true ],
+            'GET' => [],
+            'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, CURLOPT_POSTFIELDS => $body, ],
+            'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ]
+        };
+
+        $curl_opts[CURLOPT_URL] = $url;
+
+        $headers = $headers + $this->defaultHeaders;
 
         if (!empty($headers)) {
-            curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
+            $builtHeaders = [];
+            foreach($headers as $key => $value) {
+                $builtHeaders[] = strtolower($key) . ": " . (is_array($value) ? implode(",", $value) : $value);
+            }
+            $curl_opts[CURLOPT_HTTPHEADER] = $builtHeaders;
         }
+        curl_setopt_array($curl, $curl_opts);
 
-        $deferred = new Deferred();
-        $fileHandle = fopen('php://temp', 'w+');
-        if ($fileHandle === false) {
-            throw new \RuntimeException('Unable to create temporary file for response body');
-        }
-        $headerHandle = fopen('php://temp', 'w+');
-        if ($headerHandle === false) {
-            throw new \RuntimeException('Unable to create temporary file for response headers');
-        }
-        $fiber = $this->initFiber($curl);
-        $this->inProgress[$fiber] = [
-            'deferred' => $deferred,
-            'file' => $fileHandle,
-            'headers' => $headerHandle,
-        ];
-        curl_setopt($curl, CURLOPT_FILE, $fileHandle);
-        curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
-
-        //Kickstart the handler any time we initiate a new request and no requests are currently in the queue
-        if (count($this->inProgress) === 1) {
-            $this->loop->futureTick($this->curlTick(...));
-        }
-
-        return $deferred->promise();
+        return $this->execRequest($curl);
     }
 
     /**
@@ -142,12 +188,20 @@ class Browser {
         }
 
         $fiber = new Fiber(function (CurlMultiHandle $mh) use(&$fiber) {
+            Fiber::suspend();
+            $cancel = false;
             do {
                 curl_multi_exec($mh, $still_running);
                 if ($still_running) {
-                    Fiber::suspend();
+                    $cancel = Fiber::suspend();
+                    if ($cancel) { echo 'cancelling'; }
                 }
-            } while ($still_running);
+            } while ($still_running && !$cancel);
+
+            if ($cancel) {
+                return;
+            }
+
             $info = curl_multi_info_read($mh);
             $curl = $info["handle"];
             curl_multi_remove_handle($mh, $curl);
@@ -155,13 +209,16 @@ class Browser {
 
             $deferred = $this->inProgress[$fiber]['deferred'];
             if ($info['result'] === CURLE_OK) {
+                /** @var resource $responseBodyHandle */
                 $responseBodyHandle = $this->inProgress[$fiber]['file'];
                 stream_set_blocking($responseBodyHandle, false);
                 rewind($responseBodyHandle);
+                /** @var resource $responseHeaderHandle */
                 $responseHeaderHandle = $this->inProgress[$fiber]['headers'];
                 rewind($responseHeaderHandle);
                 $headers = stream_get_contents($responseHeaderHandle);
-                $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle)); //@TODO implement ReactPHP Browser withRejectErrorResponse support
+                //@TODO implement ReactPHP Browser withRejectErrorResponse support
+                $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle));
             } else {
                 $deferred->reject(new ConnectionException($curl));
             }
@@ -172,13 +229,47 @@ class Browser {
         return $fiber;
     }
 
+    protected function execRequest($curl) : PromiseInterface {
+        $fileHandle = fopen('php://temp', 'w+');
+        if ($fileHandle === false) {
+            throw new \RuntimeException('Unable to create temporary file for response body');
+        }
+        $headerHandle = fopen('php://temp', 'w+');
+        if ($headerHandle === false) {
+            throw new \RuntimeException('Unable to create temporary file for response headers');
+        }
+        curl_setopt($curl, CURLOPT_FILE, $fileHandle);
+        curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
+
+        $fiber = $this->initFiber($curl);
+
+        $deferred = new Deferred(function() use ($fiber) {
+            if (!$fiber->isTerminated()) {
+                $fiber->resume(true);
+            }
+        });
+
+        $this->inProgress[$fiber] = [
+            'deferred' => $deferred,
+            'file' => $fileHandle,
+            'headers' => $headerHandle,
+        ];
+
+        //Kickstart the handler any time we initiate a new request and no requests are currently in the queue
+        if (count($this->inProgress) === 1) {
+            $this->loop->futureTick($this->curlTick(...));
+        }
+
+        return $deferred->promise();
+    }
+
     private function curlTick(): void
     {
         foreach($this->inProgress as $fiber) {
             if ($fiber->isTerminated()) {
                 unset($this->inProgress[$fiber]);
             } else {
-                $fiber->resume();
+                $fiber->resume(false);
             }
         }
 
