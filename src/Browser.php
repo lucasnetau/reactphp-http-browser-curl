@@ -4,7 +4,6 @@ namespace EdgeTelemetrics\React\Http;
 
 use CurlHandle;
 use CurlMultiHandle;
-use Fiber;
 use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
 use React\Promise\Deferred;
@@ -27,9 +26,7 @@ use function curl_multi_strerror;
 use function curl_setopt;
 use function curl_setopt_array;
 use function fclose;
-use function feof;
 use function fopen;
-use function fread;
 use function fwrite;
 use function in_array;
 use function is_array;
@@ -43,7 +40,7 @@ use function strtolower;
 use function strtoupper;
 use function substr;
 
-require_once __DIR__ . '/Fifo2.php';
+require_once __DIR__ . '/Fifo.php';
 
 class Browser {
     protected bool $disableCurlCache = false;
@@ -239,7 +236,8 @@ class Browser {
         return $curl;
     }
 
-    private function initFiber(CurlHandle $curl) : Fiber {
+    private function initMulti(CurlHandle $curl) : CurlMultiHandle
+    {
         $multi = curl_multi_init();
         $return = curl_multi_add_handle($multi, $curl);
 
@@ -248,43 +246,7 @@ class Browser {
             throw new \RuntimeException('Unable to add curl to multi handle, Error:' . $return . ", Msg: " . curl_multi_strerror($return));
         }
 
-        $fiber = new Fiber(function (CurlMultiHandle $mh) use(&$fiber) {
-            Fiber::suspend();
-            do {
-                curl_multi_exec($mh, $still_running);
-                if ($still_running) {
-                    $cancel = Fiber::suspend();
-                    if ($cancel) {
-                        return;
-                    }
-                }
-            } while ($still_running);
-
-            $info = curl_multi_info_read($mh);
-            $curl = $info["handle"];
-            curl_multi_remove_handle($mh, $curl);
-            curl_multi_close($mh);
-
-            $deferred = $this->inProgress[$fiber]['deferred'];
-            if ($info['result'] === CURLE_OK) {
-                /** @var resource $responseBodyHandle */
-                $responseBodyHandle = $this->inProgress[$fiber]['file'];
-                stream_set_blocking($responseBodyHandle, false);
-                rewind($responseBodyHandle);
-                /** @var resource $responseHeaderHandle */
-                $responseHeaderHandle = $this->inProgress[$fiber]['headers'];
-                rewind($responseHeaderHandle);
-                $headers = stream_get_contents($responseHeaderHandle);
-                //@TODO implement ReactPHP Browser withRejectErrorResponse support
-                $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle));
-            } else {
-                $deferred->reject(new ConnectionException($curl));
-            }
-            curl_close($curl);
-        });
-
-        $fiber->start($multi);
-        return $fiber;
+        return $multi;
     }
 
     protected function execRequest($curl) : PromiseInterface {
@@ -299,15 +261,14 @@ class Browser {
         curl_setopt($curl, CURLOPT_FILE, $fileHandle);
         curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
 
-        $fiber = $this->initFiber($curl);
+        $multi = $this->initMulti($curl);
 
-        $deferred = new Deferred(function() use ($fiber) {
-            if (!$fiber->isTerminated()) {
-                $fiber->resume(true);
-            }
+        $deferred = new Deferred(function() use ($multi, &$deferred) {
+            $deferred->reject(new \RuntimeException('Request cancelled'));
+            unset($this->inProgress[$multi]);
         });
 
-        $this->inProgress[$fiber] = [
+        $this->inProgress[$multi] = [
             'deferred' => $deferred,
             'file' => $fileHandle,
             'headers' => $headerHandle,
@@ -323,17 +284,45 @@ class Browser {
 
     private function curlTick(): void
     {
-        foreach($this->inProgress as $fiber) {
-            if ($fiber->isTerminated()) {
-                unset($this->inProgress[$fiber]);
-            } else {
-                $fiber->resume(false);
+        foreach($this->inProgress as $mh) {
+            curl_multi_exec($mh, $still_running);
+            if ($still_running) {
+                continue;
             }
+
+            $deferred = $this->inProgress[$mh]['deferred'];
+            $info = curl_multi_info_read($mh);
+            if ($info === false) {
+                unset($this->inProgress[$mh]);
+                $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
+                continue;
+            }
+            $curl = $info["handle"];
+            curl_multi_remove_handle($mh, $curl);
+            curl_multi_close($mh);
+
+            if ($info['result'] === CURLE_OK) {
+                /** @var resource $responseBodyHandle */
+                $responseBodyHandle = $this->inProgress[$mh]['file'];
+                stream_set_blocking($responseBodyHandle, false);
+                rewind($responseBodyHandle);
+                /** @var resource $responseHeaderHandle */
+                $responseHeaderHandle = $this->inProgress[$mh]['headers'];
+                rewind($responseHeaderHandle);
+                $headers = stream_get_contents($responseHeaderHandle);
+                //@TODO implement ReactPHP Browser withRejectErrorResponse support
+                unset($this->inProgress[$mh]);
+                $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle));
+            } else {
+                unset($this->inProgress[$mh]);
+                $deferred->reject(new ConnectionException($curl));
+            }
+            curl_close($curl);
         }
 
         if (count($this->inProgress)) {
-            //$this->loop->addTimer(0.001, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
-            $this->loop->futureTick($this->curlTick(...));
+            $this->loop->addTimer(0.00001, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
+            //$this->loop->futureTick($this->curlTick(...));
         }
     }
 
