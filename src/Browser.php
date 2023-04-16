@@ -9,9 +9,10 @@ use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
-use React\Stream\ReadableResourceStream;
+use React\Stream\ReadableStreamInterface;
 use RingCentral\Psr7\Response as Psr7Response;
 
+use function array_key_exists;
 use function count;
 use function curl_close;
 use function curl_getinfo;
@@ -25,14 +26,24 @@ use function curl_multi_remove_handle;
 use function curl_multi_strerror;
 use function curl_setopt;
 use function curl_setopt_array;
+use function fclose;
+use function feof;
 use function fopen;
+use function fread;
+use function fwrite;
+use function in_array;
 use function is_array;
 use function preg_split;
+use function rand;
 use function rewind;
 use function stream_get_contents;
 use function stream_set_blocking;
+use function strlen;
 use function strtolower;
 use function strtoupper;
+use function substr;
+
+require_once __DIR__ . '/Fifo2.php';
 
 class Browser {
     protected bool $disableCurlCache = false;
@@ -51,6 +62,8 @@ class Browser {
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
+        CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
+        CURLOPT_VERBOSE => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
@@ -115,15 +128,63 @@ class Browser {
     {
         $curl = $this->initCurl();
 
-        if ($body instanceof ReadableResourceStream ) {
-            throw new \RuntimeException('Support not implemented');
+        $headers = array_change_key_case($headers, CASE_LOWER);
+
+        if ($body instanceof ReadableStreamInterface ) {
+            $buffer = '';
+            $rand = rand(100,999);
+
+            $context = [
+                'fifo' => [
+                    'onDrain' => static function() use (&$buffer, $body) {
+                        $body->emit('data', [$buffer]);
+                    },
+                    'onFull' => static function() use ($body) {
+                        $body->pause();
+                    }
+                ]
+            ];
+            $context = stream_context_create($context);
+            $writeStream = fopen('fifo://' . $rand, 'w', false, $context);
+            $readStream = fopen('fifo://' . $rand, 'r', false, $context);
+            //stream_set_read_buffer($readStream, 0);
+
+            $pendingClose = false;
+            $body->on('data', function ($data) use (&$writeStream, &$body, &$buffer, &$pendingClose) {
+                $written = fwrite($writeStream, $data);
+                if ($written < strlen($data)) {
+                    $body->pause();
+                    $buffer = substr($data, $written);
+                    return;
+                }
+                if ($pendingClose) {
+                    fclose($writeStream);
+                } else {
+                    $body->resume();
+                }
+            });
+            $body->on('close', function () use (&$writeStream, &$buffer, &$pendingClose, $body) {
+                if (strlen($buffer) === 0) {
+                    fclose($writeStream);
+                } else {
+                    $pendingClose = true;
+                }
+            });
+            curl_setopt($curl, CURLOPT_PUT, true);
+            curl_setopt($curl, CURLOPT_INFILE, $readStream);
+            if (array_key_exists('content-length', $headers)) {
+                curl_setopt($curl, CURLOPT_INFILESIZE, $headers['content-length']);
+                $headers['Transfer-Encoding'] = '';
+            }
+        } elseif (!in_array($method, ['HEAD','OPTIONS'])) {
+            curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
         }
 
         $method = strtoupper($method);
         $curl_opts = match($method) {
-            'HEAD' => [ CURLOPT_NOBODY => true ],
-            'GET' => [],
-            'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, CURLOPT_POSTFIELDS => $body, ],
+            'HEAD' => [ CURLOPT_NOBODY => true, ],
+            'GET' => [ CURLOPT_HTTPGET => true, ],
+            'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, ],
             'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ]
         };
 
@@ -189,18 +250,15 @@ class Browser {
 
         $fiber = new Fiber(function (CurlMultiHandle $mh) use(&$fiber) {
             Fiber::suspend();
-            $cancel = false;
             do {
                 curl_multi_exec($mh, $still_running);
                 if ($still_running) {
                     $cancel = Fiber::suspend();
-                    if ($cancel) { echo 'cancelling'; }
+                    if ($cancel) {
+                        return;
+                    }
                 }
-            } while ($still_running && !$cancel);
-
-            if ($cancel) {
-                return;
-            }
+            } while ($still_running);
 
             $info = curl_multi_info_read($mh);
             $curl = $info["handle"];
@@ -274,7 +332,8 @@ class Browser {
         }
 
         if (count($this->inProgress)) {
-            $this->loop->addTimer(0.01, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
+            //$this->loop->addTimer(0.001, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
+            $this->loop->futureTick($this->curlTick(...));
         }
     }
 
