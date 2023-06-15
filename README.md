@@ -1,5 +1,5 @@
 # reactphp-http-browser-curl
-Implementation of an Async HTTP client using CURL and Fibers.
+Implementation of an Async HTTP client using CURL.
 
 *** NOTE *** This is a work in progress, GET requests work however other HTTP verbs have not yet been implemented.
 
