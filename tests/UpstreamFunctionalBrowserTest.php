@@ -11,18 +11,17 @@ use React\Http\Message\ResponseException;
 use React\Http\Middleware\StreamingRequestMiddleware;
 use React\Promise\Promise;
 use React\Promise\Stream;
-use React\Socket\Connector;
 use React\Socket\SocketServer;
 use React\Stream\ReadableStreamInterface;
 use React\Stream\ThroughStream;
 
 class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 {
-    private $browser;
-    private $base;
+    private Browser $browser;
+    private ?string $base;
 
     /** @var ?SocketServer */
-    private $socket;
+    private SocketServer|null $socket;
 
     /**
      * @before
@@ -164,6 +163,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $http->listen($this->socket);
 
         $this->base = str_replace('tcp:', 'http:', $this->socket->getAddress()) . '/';
+        error_log((string)$this->socket->getAddress());
     }
 
     /**
@@ -171,8 +171,8 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
      */
     public function cleanUpSocketServer()
     {
-        $this->browser = null;
-        error_log('gc' . gc_collect_cycles() + gc_collect_cycles());
+        unset($this->browser);
+        //error_log('gc' . gc_collect_cycles() + gc_collect_cycles());
 
         $this->socket->close();
         $this->socket = null;
@@ -232,7 +232,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     public function testRequestWithoutAuthenticationFails()
     {
         $this->setExpectedException('RuntimeException');
-        $response = \React\Async\await($this->browser->get($this->base . 'basic-auth/user/pass'));
+        $response = \React\Async\await($this->browser->get($this->base . 'basic-auth/user/pass', ['Connection' => 'close']));
     }
 
     /**
@@ -351,7 +351,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $browser = $this->browser->withFollowRedirects(0);
 
         $this->setExpectedException('RuntimeException');
-        \React\Async\await($browser->get($this->base . 'redirect-to?url=get'));
+        \React\Async\await($browser->get($this->base . 'redirect-to?url=get', ['Connection' => 'close']));
     }
 
     public function testResponseStatus204ShouldResolveWithEmptyBody()
@@ -376,15 +376,14 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
     /**
      * @doesNotPerformAssertions
-
+     **/
     public function testGetRequestWithResponseBufferMatchedExactlyResolves()
     {
         $promise = $this->browser->withResponseBuffer(5)->get($this->base . 'get');
 
         \React\Async\await($promise);
-    }**/
+    }
 
-    /**
     public function testGetRequestWithResponseBufferExceededRejects()
     {
         $promise = $this->browser->withResponseBuffer(4)->get($this->base . 'get');
@@ -395,11 +394,11 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
             defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 0
         );
         \React\Async\await($promise);
-    }**/
+    }
 
-    /**
     public function testGetRequestWithResponseBufferExceededDuringStreamingRejects()
     {
+        $this->markTestSkipped('error is wonky');
         $promise = $this->browser->withResponseBuffer(4)->get($this->base . 'stream/1');
 
         $this->setExpectedException(
@@ -408,7 +407,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
             defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 0
         );
         \React\Async\await($promise);
-    }**/
+    }
 
     /**
      * @group internet
@@ -416,10 +415,6 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
      */
     public function testCanAccessHttps()
     {
-        if (defined('HHVM_VERSION')) {
-            $this->markTestSkipped('Not supported on HHVM');
-        }
-
         \React\Async\await($this->browser->get('https://www.google.com/'));
     }
 
@@ -428,18 +423,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
      */
     public function testVerifyPeerEnabledForBadSslRejects()
     {
-        $this->markTestSkipped('NOT IMPLEMENTED');
-        if (defined('HHVM_VERSION')) {
-            $this->markTestSkipped('Not supported on HHVM');
-        }
-
-        $connector = new Connector(array(
-            'tls' => array(
-                'verify_peer' => true
-            )
-        ));
-
-        $browser = new Browser($connector);
+        $browser = new Browser([CURLOPT_SSL_VERIFYPEER => true]);
 
         $this->setExpectedException('RuntimeException');
         \React\Async\await($browser->get('https://self-signed.badssl.com/'));
@@ -451,18 +435,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
      */
     public function testVerifyPeerDisabledForBadSslResolves()
     {
-        $this->markTestSkipped('NOT IMPLEMENTED');
-        if (defined('HHVM_VERSION')) {
-            $this->markTestSkipped('Not supported on HHVM');
-        }
-
-        $connector = new Connector(array(
-            'tls' => array(
-                'verify_peer' => false
-            )
-        ));
-
-        $browser = new Browser($connector);
+        $browser = new Browser([CURLOPT_SSL_VERIFYPEER => false]);
 
         \React\Async\await($browser->get('https://self-signed.badssl.com/'));
     }
@@ -473,13 +446,13 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     public function testInvalidPort()
     {
         $this->setExpectedException('RuntimeException');
-        \React\Async\await($this->browser->get('http://www.google.com:443/'));
+        \React\Async\await($this->browser->get('http://www.google.com:443/', ['Connection' => 'close']));
     }
 
     public function testErrorStatusCodeRejectsWithResponseException()
     {
         try {
-            \React\Async\await($this->browser->get($this->base . 'status/404'));
+            \React\Async\await($this->browser->get($this->base . 'status/404', ['Connection' => 'close']));
             $this->fail();
         } catch (ResponseException $e) {
             $this->assertEquals(404, $e->getCode());
@@ -519,8 +492,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     {
         $response = \React\Async\await($this->browser->withProtocolVersion('1.1')->get($this->base . 'stream/1'));
 
-        error_log($response->getProtocolVersion());
-        $this->assertEquals('2', $response->getProtocolVersion());
+        $this->assertEquals('1.1', $response->getProtocolVersion());
 
         $this->assertEquals('chunked', $response->getHeaderLine('Transfer-Encoding'));
 
@@ -532,7 +504,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     {
         $response = \React\Async\await($this->browser->withProtocolVersion('1.1')->head($this->base . 'stream/1'));
 
-        $this->assertEquals('2', $response->getProtocolVersion());
+        $this->assertEquals('1.1', $response->getProtocolVersion());
 
         $this->assertEquals('chunked', $response->getHeaderLine('Transfer-Encoding'));
         $this->assertEquals('', (string) $response->getBody());
@@ -550,14 +522,18 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
 
-        $response = \React\Async\await($this->browser->get($this->base . 'stream/1'));
-
-        $socket->close();
+        try {
+            $response = \React\Async\await($this->browser->get($this->base . 'stream/1'));
+        } finally { //ensure we cleanup
+            $socket->close();
+        }
 
         $this->assertEquals('1.1', $response->getProtocolVersion());
 
         $this->assertEquals('chunked, chunked', $response->getHeaderLine('Transfer-Encoding'));
         $this->assertEquals('hello', (string) $response->getBody());
+
+        $socket->close();
     }
 
     public function testReceiveStreamAndExplicitlyCloseConnectionEvenWhenServerKeepsConnectionOpen()
@@ -575,7 +551,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
 
-        $response = \React\Async\await($this->browser->get($this->base . 'get', array()));
+        $response = \React\Async\await($this->browser->get($this->base . 'get', ['Connection' => 'close']));
         $this->assertEquals('hello', (string)$response->getBody());
 
         $ret = \React\Async\await(\React\Promise\Timer\timeout($closed->promise(), 0.1));
@@ -601,6 +577,22 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
 
+        $response = \React\Async\await($this->browser->get($this->base . 'get', ['Connection' => 'close']));
+        assert($response instanceof ResponseInterface);
+        $this->assertEquals('hello', (string)$response->getBody());
+
+        $response = \React\Async\await($this->browser->get($this->base . 'get'));
+        assert($response instanceof ResponseInterface);
+        $this->assertEquals('hello', (string)$response->getBody());
+
+        $socket->close();
+    }
+
+
+    public function testRequestWithoutConnectionHeaderWillReuseExistingConnectionForSecondRequest()
+    {
+        $this->socket->on('connection', $this->expectCallableOnce());
+
         $response = \React\Async\await($this->browser->get($this->base . 'get'));
         assert($response instanceof ResponseInterface);
         $this->assertEquals('hello', (string)$response->getBody());
@@ -610,29 +602,9 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->assertEquals('hello', (string)$response->getBody());
     }
 
-    /**
-    public function testRequestWithoutConnectionHeaderWillReuseExistingConnectionForSecondRequest()
-    {
-        $this->socket->on('connection', $this->expectCallableOnce());
-
-        // remove default `Connection: close` request header to enable keep-alive
-        $this->browser = $this->browser->withoutHeader('Connection');
-
-        $response = \React\Async\await($this->browser->get($this->base . 'get'));
-        assert($response instanceof ResponseInterface);
-        $this->assertEquals('hello', (string)$response->getBody());
-
-        $response = \React\Async\await($this->browser->get($this->base . 'get'));
-        assert($response instanceof ResponseInterface);
-        $this->assertEquals('hello', (string)$response->getBody());
-    }**/
-
     public function testRequestWithoutConnectionHeaderWillReuseExistingConnectionForRedirectedRequest()
     {
         $this->socket->on('connection', $this->expectCallableOnce());
-
-        // remove default `Connection: close` request header to enable keep-alive
-        $this->browser = $this->browser->withoutHeader('Connection');
 
         $response = \React\Async\await($this->browser->get($this->base . 'redirect-to?url=get'));
         assert($response instanceof ResponseInterface);
@@ -677,25 +649,28 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $http = new HttpServer(new StreamingRequestMiddleware(), function (ServerRequestInterface $request) {
             return new Response(200);
         });
+
         $socket = new SocketServer('127.0.0.1:0');
-        $http->listen($socket);
+        try {
+            $http->listen($socket);
 
-        $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
+            $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
 
-        $stream = new ThroughStream();
-        \React\Async\await($this->browser->post($this->base . 'post', array(), $stream));
+            $stream = new ThroughStream();
+            \React\Async\await($this->browser->post($this->base . 'post', ['Connection' => 'close'], $stream));
 
-        $socket->close();
+        } finally {
+            $socket->close();
+        }
     }
 
     public function testPostStreamClosed()
     {
-        $this->markTestSkipped('FLAKY');
         $stream = new ThroughStream();
         $stream->close();
 
-        $response = \React\Async\await($this->browser->post($this->base . 'post', array(), $stream));
-        error_log('got data after stream closed');
+        $response = \React\Async\await($this->browser->post($this->base . 'post', ['Connection' => 'close'], $stream));
+
         $data = json_decode((string)$response->getBody(), true);
 
         $this->assertEquals('', $data['data']);
@@ -784,7 +759,6 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->assertEquals('hello', $buffer);
     }
 
-    /**
     public function testRequestStreamingGetReceivesStreamingResponseBodyEvenWhenResponseBufferExceeded()
     {
         $buffer = \React\Async\await(
@@ -795,5 +769,4 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->assertEquals('hello', $buffer);
     }
-     **/
 }

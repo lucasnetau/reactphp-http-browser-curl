@@ -20,7 +20,6 @@ use RingCentral\Psr7\Uri;
 use Throwable;
 use function array_key_exists;
 use function count;
-use function curl_close;
 use function curl_getinfo;
 use function curl_init;
 use function curl_multi_add_handle;
@@ -28,11 +27,13 @@ use function curl_multi_close;
 use function curl_multi_exec;
 use function curl_multi_info_read;
 use function curl_multi_init;
-use function curl_multi_remove_handle;
 use function curl_multi_strerror;
 use function curl_pause;
 use function curl_setopt;
 use function curl_setopt_array;
+use function curl_share_close;
+use function curl_share_setopt;
+use function curl_strerror;
 use function fopen;
 use function in_array;
 use function is_array;
@@ -60,7 +61,7 @@ class Browser {
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
-        CURLOPT_VERBOSE => false,
+        CURLOPT_VERBOSE => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
@@ -81,9 +82,12 @@ class Browser {
 
     private $baseUrl;
 
+    private int $maximumSize = 16777216; // 16 MiB = 2^24 bytes;
+
     private bool $obeySuccessCode = true;
 
     private int $httpVersion = CURL_HTTP_VERSION_NONE;
+    private \CurlShareHandle $curlShare;
 
     /**
      * @param EventLoop\LoopInterface|null $loop
@@ -95,6 +99,13 @@ class Browser {
         }
 
         $this->inProgress = new \SplObjectStorage();
+        
+        $share = curl_share_init();
+        curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+        curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        $this->curlShare = $share;
     }
 
     public function isIdle() : bool {
@@ -217,11 +228,18 @@ class Browser {
         $version = match($protocolVersion) {
             '1.0' => CURL_HTTP_VERSION_1_0,
             '1.1' => CURL_HTTP_VERSION_1_1,
-            '2.0' => CURL_HTTP_VERSION_2,
+            '2' => CURL_HTTP_VERSION_2,
             default => CURL_HTTP_VERSION_NONE
         };
         return $this->withOptions(array(
             'httpVersion' => $version,
+        ));
+    }
+
+    public function withResponseBuffer($maximumSize)
+    {
+        return $this->withOptions(array(
+            'maximumSize' => $maximumSize
         ));
     }
 
@@ -293,6 +311,10 @@ class Browser {
 
         $headers = $headers + $this->defaultHeaders;
 
+        if (($headers['connection'] ?? '') === 'close') {
+            $curl_opts[CURLOPT_FORBID_REUSE] = true; //Curl keeps the connection open if the server doesn't close even if we said we are closing
+        }
+
         if (!empty($headers)) {
             $builtHeaders = [];
             foreach($headers as $key => $value) {
@@ -333,6 +355,8 @@ class Browser {
 
         if ($this->disableCurlCache) {
             $options = $options + static::NO_CACHE_OPTIONS;
+        } else {
+            curl_setopt($curl, CURLOPT_SHARE, $this->curlShare);
         }
 
         curl_setopt_array($curl, $options);
@@ -379,13 +403,38 @@ class Browser {
             if ($responseBody === false) {
                 throw new \RuntimeException('Unable to create temporary file for response body');
             }
-            curl_setopt($curl, CURLOPT_FILE, $responseBody);
+            $maxlen = $this->maximumSize;
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
+                static $xfer = 0;
+                $len = strlen($data);
+                $xfer += $len;
+
+                if ($xfer > $this->maximumSize) {
+                    $transaction = $this->inProgress[$multi];
+                    $transaction->deferred->reject(new \OverflowException(
+                        'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
+                        \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
+                    ));
+                    unset($transaction);
+                    unset($this->inProgress[$multi]);
+                    return 0;
+                }
+
+                fwrite($responseBody, $data);
+                return $len;
+            });
+            //curl_setopt($curl, CURLOPT_FILE, $responseBody);
         }
 
         /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
         curl_setopt($curl, CURLOPT_NOPROGRESS, 0);
         curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) use ($multi) {
+            if (!$this->inProgress->contains($multi)) {
+                return 0;
+            }
+
             $status = Transaction::STATUS_CONNECTING;
+            $oldStatus = $this->inProgress[$multi]->status;
             if ($dl_xfer > 0 || $dl_total > 0) {
                 if ($dl_xfer >= $dl_total) {
                     $status = Transaction::STATUS_DONE;
@@ -395,10 +444,13 @@ class Browser {
             } elseif ($ul_xfer > 0) {
                 $status = Transaction::STATUS_UPLOADING;
             }
-            if ($this->inProgress[$multi]->status !== $status) {
+            if ($status !== $oldStatus) {
                 $this->inProgress[$multi]->status = $status;
+                if ($oldStatus === Transaction::STATUS_UPLOADING) {
+                    curl_pause($curl, CURLPAUSE_CONT); //Ensure we are not paused
+                }
             }
-            return 0;
+            return 0; //Keep going
         });
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
@@ -444,31 +496,22 @@ class Browser {
                 continue;
             }
             $curl = $transaction->curl;
-            curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, null);
-            curl_setopt($curl, CURLOPT_WRITEFUNCTION, null);
-            curl_setopt($curl, CURLOPT_INFILE, null);
-            curl_multi_remove_handle($mh, $curl);
-            curl_multi_close($mh);
 
             if ($transaction->file instanceof ThroughStream) {
                 $transaction->file->end();
             }
+            unset($transaction);
+
             if ($info['result'] === CURLE_OK) {
                 $this->resolveResponse($mh, $curl);
-                unset($this->inProgress[$mh]);
-                unset($transaction);
             } else {
-                unset($this->inProgress[$mh]);
-                unset($transaction);
                 if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
-                    $deferred->reject(new \RuntimeException('Request timed out after ' . $this->timeout . ' seconds'));
+                    $deferred->reject(new \RuntimeException('Request timed out after ' . $this->timeout . ' seconds'), CURLE_OPERATION_TIMEDOUT);
                 } else {
-                    error_log(curl_multi_strerror($info['result']) .  $info['result']);
-                    $deferred->reject(new ConnectionException($curl, curl_multi_strerror($info['result']), $info['result']));
+                    $deferred->reject(new \RuntimeException(curl_strerror($info['result']), $info['result']));
                 }
             }
-            curl_close($curl);
-            unset($curl);
+            unset($this->inProgress[$mh]);
         }
 
         if (count($this->inProgress)) {
@@ -543,11 +586,18 @@ class Browser {
             $body = new ReadableBodyStream($body, $length);
         }
 
+        $httpVersion = match(curl_getinfo($curl, CURLINFO_HTTP_VERSION)) {
+            //@TODO check if we need to parse all the CURL_HTTP_VERSION_* values
+            CURL_HTTP_VERSION_1_1 => '1.1',
+            CURL_HTTP_VERSION_2 => '2',
+            CURL_HTTP_VERSION_NONE, CURL_HTTP_VERSION_1_0 => '1.0',
+        };
+
         $response = new \React\Http\Message\Response(
             $code,
             $headers,
             $body,
-            curl_getinfo($curl, CURLINFO_HTTP_VERSION),
+            $httpVersion,
         );
 
         if ($this->obeySuccessCode && ($code < 200 || $code >= 400)) {
@@ -561,5 +611,7 @@ class Browser {
         foreach($this->inProgress as $mh) {
             unset($this->inProgress[$mh]);
         }
+        curl_share_close($this->curlShare);
+        unset($this->curlShare);
     }
 }

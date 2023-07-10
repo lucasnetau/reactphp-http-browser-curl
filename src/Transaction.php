@@ -7,6 +7,8 @@ use React\Promise\Deferred;
 use function curl_close;
 use function curl_multi_close;
 use function curl_multi_remove_handle;
+use function curl_pause;
+use function curl_setopt;
 use function fclose;
 use function is_resource;
 
@@ -27,8 +29,13 @@ class Transaction {
 
     public function __destruct() {
         if (isset($this->multi)) {
+            $this->deferred->promise()->cancel();
+            curl_pause($this->curl, CURLPAUSE_CONT);
             curl_multi_remove_handle($this->multi, $this->curl);
             curl_multi_close($this->multi);
+            curl_setopt($this->curl, CURLOPT_XFERINFOFUNCTION, null);
+            curl_setopt($this->curl, CURLOPT_WRITEFUNCTION, null);
+            curl_setopt($this->curl, CURLOPT_INFILE, null);
             curl_close($this->curl);
             unset($this->multi);
             unset($this->curl);
@@ -36,6 +43,7 @@ class Transaction {
             if(is_resource($this->file)) {
                 fclose($this->file);
             }
+            error_log('cleanedup');
         }
     }
 
