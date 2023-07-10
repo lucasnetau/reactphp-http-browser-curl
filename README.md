@@ -19,7 +19,7 @@ composer require edgetelemetrics/reactphp-http-browser-curl
 ```
 
 ## Examples
-See [/examples](/examples) directory
+See [/examples](/examples) directory. Examples based on examples from reactphp/http under MIT License
 
 ## Timing
 Request timing values are returned in the PSR7 Response object headers under the key [Server-Timing](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing)

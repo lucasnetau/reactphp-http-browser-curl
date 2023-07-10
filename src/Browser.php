@@ -4,13 +4,20 @@ namespace EdgeTelemetrics\React\Http;
 
 use CurlHandle;
 use CurlMultiHandle;
+use EdgeTelemetrics\React\Http\Io\UploadBodyStream;
+use Fig\Http\Message\StatusCodeInterface;
 use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
+use React\Http\Io\ReadableBodyStream;
+use React\Http\Message\ResponseException;
+use React\Promise;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use React\Stream\ReadableStreamInterface;
-use RingCentral\Psr7\Response as Psr7Response;
 
+use React\Stream\ThroughStream;
+use RingCentral\Psr7\Uri;
+use Throwable;
 use function array_key_exists;
 use function count;
 use function curl_close;
@@ -23,24 +30,20 @@ use function curl_multi_info_read;
 use function curl_multi_init;
 use function curl_multi_remove_handle;
 use function curl_multi_strerror;
+use function curl_pause;
 use function curl_setopt;
 use function curl_setopt_array;
-use function fclose;
 use function fopen;
-use function fwrite;
 use function in_array;
 use function is_array;
 use function preg_split;
-use function rand;
+use function property_exists;
 use function rewind;
 use function stream_get_contents;
 use function stream_set_blocking;
 use function strlen;
 use function strtolower;
 use function strtoupper;
-use function substr;
-
-require_once __DIR__ . '/Fifo.php';
 
 class Browser {
     protected bool $disableCurlCache = false;
@@ -54,21 +57,33 @@ class Browser {
 
     const DEFAULT_CURL_OPTIONS = [
         CURLOPT_HEADER => false, //We will write headers out to a separate file
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_TIMEOUT => 120,
-        CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
-        CURLOPT_VERBOSE => true,
+        CURLOPT_VERBOSE => false,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
+
 
     protected array $defaultHeaders = [
         'User-Agent' => 'EdgeTelemetricsBrowser/1',
     ];
 
     private \SplObjectStorage $inProgress;
+
+    private bool $streaming = false;
+
+    private bool $followRedirects = true;
+
+    private null|float|int $timeout = null;
+
+    private int|null $maxRedirects = 20;
+
+    private $baseUrl;
+
+    private bool $obeySuccessCode = true;
+
+    private int $httpVersion = CURL_HTTP_VERSION_NONE;
 
     /**
      * @param EventLoop\LoopInterface|null $loop
@@ -80,6 +95,10 @@ class Browser {
         }
 
         $this->inProgress = new \SplObjectStorage();
+    }
+
+    public function isIdle() : bool {
+        return count($this->inProgress) === 0;
     }
 
     public function head(string $url, array $headers = []) : PromiseInterface {
@@ -110,65 +129,140 @@ class Browser {
         return $this->request('DELETE',$url,$headers, $body);
     }
 
+    protected function withOptions(array $options = []) : self {
+        $browser = clone $this;
+        $browser->inProgress = new \SplObjectStorage();
+        foreach ($options as $name => $value) {
+            if (property_exists($this, $name)) {
+                // restore default value if null is given
+                if ($value === null) {
+                    $default = new self();
+                    $value = $default->$name;
+                }
+
+                $browser->$name = $value;
+            }
+        }
+        return $browser;
+    }
+
     public function requestStreaming($method, $url, array $headers = [], $body = ''): PromiseInterface {
-        return $this->request($method, $url, $headers, $body);
+        return $this->withOptions(['streaming' => true])->request($method, $url, $headers, $body);
+    }
+
+    public function withTimeout(float|int|bool $timeout)
+    {
+        if ($timeout === true) {
+            $timeout = null;
+        } elseif ($timeout === false) {
+            $timeout = 0;
+        } elseif ($timeout < 0) {
+            $timeout = 0;
+        }
+
+        return $this->withOptions(['timeout' => $timeout]);
+    }
+
+    public function withHeader($header, $value)
+    {
+        $browser = $this->withoutHeader($header);
+        $browser->defaultHeaders[$header] = $value;
+
+        return $browser;
+    }
+
+    public function withoutHeader($header)
+    {
+        $browser = $this->withOptions();
+
+        /** @var string|int $key */
+        foreach (\array_keys($browser->defaultHeaders) as $key) {
+            if (\strcasecmp($key, $header) === 0) {
+                unset($browser->defaultHeaders[$key]);
+                break;
+            }
+        }
+
+        return $browser;
+    }
+
+    public function withFollowRedirects($followRedirects)
+    {
+        return $this->withOptions(array(
+            'followRedirects' => $followRedirects !== false,
+            'maxRedirects' => \is_bool($followRedirects) ? null : $followRedirects
+        ));
+    }
+
+    public function withBase($baseUrl)
+    {
+        if ($baseUrl !== null) {
+            $baseUrl = new Uri($baseUrl);
+            if (!\in_array($baseUrl->getScheme(), ['http', 'https']) || $baseUrl->getHost() === '') {
+                throw new \InvalidArgumentException('Base URL must be absolute');
+            }
+        }
+        return $this->withOptions(['baseUrl' => $baseUrl]);
+    }
+
+    public function withRejectErrorResponse($obeySuccessCode)
+    {
+        return $this->withOptions(array(
+            'obeySuccessCode' => $obeySuccessCode,
+        ));
+    }
+
+    public function withProtocolVersion(string $protocolVersion)
+    {
+        $version = match($protocolVersion) {
+            '1.0' => CURL_HTTP_VERSION_1_0,
+            '1.1' => CURL_HTTP_VERSION_1_1,
+            '2.0' => CURL_HTTP_VERSION_2,
+            default => CURL_HTTP_VERSION_NONE
+        };
+        return $this->withOptions(array(
+            'httpVersion' => $version,
+        ));
     }
 
     /**
      * @param $method
      * @param $url
      * @param array $headers
-     * @param $body
+     * @param string|ReadableStreamInterface $body
      * @return PromiseInterface
      */
-    public function request($method, $url, array $headers = [], $body = ''): PromiseInterface
+    public function request($method, $url, array $headers = [], string|ReadableStreamInterface $body = ''): PromiseInterface
     {
+        if ($this->baseUrl !== null) {
+            // ensure we're actually below the base URL
+            $url = Uri::resolve($this->baseUrl, $url);
+        } else {
+            $url = new Uri($url);
+            if ($url->getHost() === '') {
+                return Promise\reject(
+                    new \InvalidArgumentException(
+                        'Invalid request URL given'
+                    )
+                );
+            }
+        }
+
         $curl = $this->initCurl();
 
         $headers = array_change_key_case($headers, CASE_LOWER);
 
         if ($body instanceof ReadableStreamInterface ) {
-            $buffer = '';
-            $rand = rand(100,999);
-
-            $context = [
-                'fifo' => [
-                    'onDrain' => static function() use (&$buffer, $body) {
-                        $body->emit('data', [$buffer]);
-                    },
-                    'onFull' => static function() use ($body) {
-                        $body->pause();
-                    }
-                ]
-            ];
-            $context = stream_context_create($context);
-            $writeStream = fopen('fifo://' . $rand, 'w', false, $context);
-            $readStream = fopen('fifo://' . $rand, 'r', false, $context);
-            //stream_set_read_buffer($readStream, 0);
-
-            $pendingClose = false;
-            $body->on('data', function ($data) use (&$writeStream, &$body, &$buffer, &$pendingClose) {
-                $written = fwrite($writeStream, $data);
-                if ($written < strlen($data)) {
-                    $body->pause();
-                    $buffer = substr($data, $written);
-                    return;
-                }
-                if ($pendingClose) {
-                    fclose($writeStream);
-                } else {
-                    $body->resume();
-                }
+            $upload = new UploadBodyStream($body);
+            $upload->on('pause', static function () use ($curl) {
+                curl_pause($curl, CURLPAUSE_SEND);
             });
-            $body->on('close', function () use (&$writeStream, &$buffer, &$pendingClose, $body) {
-                if (strlen($buffer) === 0) {
-                    fclose($writeStream);
-                } else {
-                    $pendingClose = true;
-                }
+            $upload->on('continue', static function () use ($curl) {
+                curl_pause($curl, CURLPAUSE_CONT);
             });
+
             curl_setopt($curl, CURLOPT_PUT, true);
-            curl_setopt($curl, CURLOPT_INFILE, $readStream);
+            curl_setopt($curl, CURLOPT_INFILE, $upload->getReadableStream());
             if (array_key_exists('content-length', $headers)) {
                 curl_setopt($curl, CURLOPT_INFILESIZE, $headers['content-length']);
                 $headers['Transfer-Encoding'] = '';
@@ -184,6 +278,16 @@ class Browser {
             'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, ],
             'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ]
         };
+
+        $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
+
+        if ($this->timeout !== null && $this->timeout >=1)
+        {
+            $curl_opts[CURLOPT_TIMEOUT_MS] = $this->timeout*1000;
+        }
+
+        $curl_opts[CURLOPT_FOLLOWLOCATION] = $this->followRedirects;
+        $curl_opts[CURLOPT_MAXREDIRS] = $this->maxRedirects;
 
         $curl_opts[CURLOPT_URL] = $url;
 
@@ -220,7 +324,7 @@ class Browser {
     private function initCurl() : CurlHandle {
         $curl = curl_init();
 
-        if ($curl === false) {
+        if ($curl === false || $curl === null) {
             throw new \RuntimeException('Unable to init curl');
         }
 
@@ -250,29 +354,61 @@ class Browser {
     }
 
     protected function execRequest($curl) : PromiseInterface {
-        $fileHandle = fopen('php://temp', 'w+');
-        if ($fileHandle === false) {
-            throw new \RuntimeException('Unable to create temporary file for response body');
-        }
-        $headerHandle = fopen('php://temp', 'w+');
+        $headerHandle = fopen('php://memory', 'w+');
         if ($headerHandle === false) {
             throw new \RuntimeException('Unable to create temporary file for response headers');
         }
-        curl_setopt($curl, CURLOPT_FILE, $fileHandle);
         curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
 
         $multi = $this->initMulti($curl);
+
+        if ($this->streaming) {
+            $responseBody = new ThroughStream();
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
+                static $first = true;
+                if ($first) {
+                    $this->resolveResponse($multi, $curl);
+                    $first = false;
+                }
+
+                $responseBody->write($data);
+                return strlen($data);
+            });
+        } else {
+            $responseBody = fopen('php://temp', 'w+');
+            if ($responseBody === false) {
+                throw new \RuntimeException('Unable to create temporary file for response body');
+            }
+            curl_setopt($curl, CURLOPT_FILE, $responseBody);
+        }
+
+        /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
+        curl_setopt($curl, CURLOPT_NOPROGRESS, 0);
+        curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) use ($multi) {
+            $status = Transaction::STATUS_CONNECTING;
+            if ($dl_xfer > 0 || $dl_total > 0) {
+                if ($dl_xfer >= $dl_total) {
+                    $status = Transaction::STATUS_DONE;
+                } else {
+                    $status = Transaction::STATUS_DOWNLOADING;
+                }
+            } elseif ($ul_xfer > 0) {
+                $status = Transaction::STATUS_UPLOADING;
+            }
+            if ($this->inProgress[$multi]->status !== $status) {
+                $this->inProgress[$multi]->status = $status;
+            }
+            return 0;
+        });
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
             $deferred->reject(new \RuntimeException('Request cancelled'));
             unset($this->inProgress[$multi]);
         });
 
-        $this->inProgress[$multi] = [
-            'deferred' => $deferred,
-            'file' => $fileHandle,
-            'headers' => $headerHandle,
-        ];
+        $this->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);
+
+        curl_multi_exec($multi, $_); //GEt it started
 
         //Kickstart the handler any time we initiate a new request and no requests are currently in the queue
         if (count($this->inProgress) === 1) {
@@ -284,53 +420,97 @@ class Browser {
 
     private function curlTick(): void
     {
+        $nextIterationTimeout = 0.1; //100ms suggested by Curl
         foreach($this->inProgress as $mh) {
+            $transaction = $this->inProgress[$mh];
             curl_multi_exec($mh, $still_running);
             if ($still_running) {
+                if ($nextIterationTimeout !== 0) {
+                    if (curl_multi_select($mh, 0) > 0) {
+                        $nextIterationTimeout = 0;
+                    } elseif ($this->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
+                        $nextIterationTimeout = 0.0001;
+                    }
+                }
                 continue;
             }
 
-            $deferred = $this->inProgress[$mh]['deferred'];
+            $deferred = $transaction->deferred;
             $info = curl_multi_info_read($mh);
             if ($info === false) {
                 unset($this->inProgress[$mh]);
+                unset($transaction);
                 $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
                 continue;
             }
-            $curl = $info["handle"];
+            $curl = $transaction->curl;
+            curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, null);
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, null);
+            curl_setopt($curl, CURLOPT_INFILE, null);
             curl_multi_remove_handle($mh, $curl);
             curl_multi_close($mh);
 
+            if ($transaction->file instanceof ThroughStream) {
+                $transaction->file->end();
+            }
             if ($info['result'] === CURLE_OK) {
-                /** @var resource $responseBodyHandle */
-                $responseBodyHandle = $this->inProgress[$mh]['file'];
-                stream_set_blocking($responseBodyHandle, false);
-                rewind($responseBodyHandle);
-                /** @var resource $responseHeaderHandle */
-                $responseHeaderHandle = $this->inProgress[$mh]['headers'];
-                rewind($responseHeaderHandle);
-                $headers = stream_get_contents($responseHeaderHandle);
-                //@TODO implement ReactPHP Browser withRejectErrorResponse support
+                $this->resolveResponse($mh, $curl);
                 unset($this->inProgress[$mh]);
-                $deferred->resolve($this->constructResponseFromCurl($curl, $headers, $responseBodyHandle));
+                unset($transaction);
             } else {
                 unset($this->inProgress[$mh]);
-                $deferred->reject(new ConnectionException($curl));
+                unset($transaction);
+                if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
+                    $deferred->reject(new \RuntimeException('Request timed out after ' . $this->timeout . ' seconds'));
+                } else {
+                    error_log(curl_multi_strerror($info['result']) .  $info['result']);
+                    $deferred->reject(new ConnectionException($curl, curl_multi_strerror($info['result']), $info['result']));
+                }
             }
             curl_close($curl);
+            unset($curl);
         }
 
         if (count($this->inProgress)) {
-            $this->loop->addTimer(0.00001, $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
-            //$this->loop->futureTick($this->curlTick(...));
+            if ($nextIterationTimeout > 0) {
+                $this->loop->addTimer($nextIterationTimeout,
+                    $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
+            } else {
+                $this->loop->futureTick($this->curlTick(...));
+            }
+        }
+    }
+
+    private function resolveResponse($mh, $curl): void
+    {
+        $responseBody = $this->inProgress[$mh]->file;
+        if (!($responseBody instanceof ThroughStream)) {
+            stream_set_blocking($responseBody, false);
+            rewind($responseBody);
+            $responseBody = \RingCentral\Psr7\stream_for($responseBody);
+        }
+
+        /** @var resource $responseHeaderHandle */
+        $responseHeaderHandle = $this->inProgress[$mh]->headers;
+        rewind($responseHeaderHandle);
+        $headers = stream_get_contents($responseHeaderHandle);
+        //@TODO implement ReactPHP Browser withRejectErrorResponse support
+        $deferred = $this->inProgress[$mh]->deferred;
+        try {
+            $res = $this->constructResponseFromCurl($curl, $headers, $responseBody);
+            $deferred->resolve($res);
+        } catch (Throwable $ex) {
+            $deferred->reject($ex);
         }
     }
 
     private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, $body) : ResponseInterface {
         $headers = [];
         $lines = preg_split('/(\\r?\\n)/', trim($rawHeaders), -1);
-        array_shift($lines);
         foreach($lines as $headerLine) {
+            if ($headerLine === '' || $headerLine === 'HTTP/1.1 100 Continue') {
+                continue;
+            }
             $parts = explode(':', $headerLine, 2);
             $key = trim($parts[0]);
             $value = isset($parts[1]) ? trim($parts[1]) : '';
@@ -338,7 +518,7 @@ class Browser {
         }
 
         $info = curl_getinfo($curl);
-        $info['appconnect_time'] = curl_getinfo($curl,CURLINFO_APPCONNECT_TIME);
+        $info['appconnect_time'] = curl_getinfo($curl,CURLINFO_APPCONNECT_TIME); //appconnect_time is not in the curl_getinfo default result list
         $timing = [];
         foreach(["namelookup_time", "connect_time", "appconnect_time", "pretransfer_time", "redirect_time", "starttransfer_time", "total_time",] as $timingKey) {
             $timing[] = "$timingKey;dur=". $info[$timingKey];
@@ -350,11 +530,36 @@ class Browser {
             $headers['X-Certificate'] = $certs[0]['Cert'];
         }
 
-        return new Psr7Response(
-            curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
+        // determine length of response body
+        $length = null;
+        $code = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+        if (curl_getinfo($curl, CURLINFO_EFFECTIVE_METHOD) === 'HEAD' || ($code >= 100 && $code < 200) || $code == StatusCodeInterface::STATUS_NO_CONTENT || $code == StatusCodeInterface::STATUS_NOT_MODIFIED) {
+            $length = 0;
+        } elseif (array_key_exists('Content-Length', $headers)) {
+            $length = (int)$headers['Content-Length'][0];
+        }
+
+        if ($body instanceof ThroughStream) {
+            $body = new ReadableBodyStream($body, $length);
+        }
+
+        $response = new \React\Http\Message\Response(
+            $code,
             $headers,
-            \RingCentral\Psr7\stream_for($body),
+            $body,
             curl_getinfo($curl, CURLINFO_HTTP_VERSION),
         );
+
+        if ($this->obeySuccessCode && ($code < 200 || $code >= 400)) {
+            throw new ResponseException($response);
+        }
+
+        return $response;
+    }
+
+    public function __destruct() {
+        foreach($this->inProgress as $mh) {
+            unset($this->inProgress[$mh]);
+        }
     }
 }

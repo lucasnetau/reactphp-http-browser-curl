@@ -20,16 +20,22 @@
     "phpunit/phpunit": "^9.5",
     "react/http": "^1.6",
     "react/dns": "*",
+    "react/async": "^4 || ^3 || ^2",
+    "react/promise-stream": "^1.4",
+    "react/promise-timer": "^1.9",
     "ringcentral/psr7": "^1.2"
   },
   "autoload": {
     "psr-4": {
       "EdgeTelemetrics\\React\\Http\\": "src/"
-    }
+    },
+    "files": [
+      "src/FifoStreamWrapper.php"
+    ]
   },
   "autoload-dev": {
     "psr-4": {
-      "EdgeTelemetrics\\React\\Http\\Tests\\": "tests/"
+      "React\\Tests\\Http\\": "tests/"
     }
   }
 }
