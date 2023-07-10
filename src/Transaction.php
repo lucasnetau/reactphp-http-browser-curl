@@ -43,7 +43,6 @@ class Transaction {
             if(is_resource($this->file)) {
                 fclose($this->file);
             }
-            error_log('cleanedup');
         }
     }
 

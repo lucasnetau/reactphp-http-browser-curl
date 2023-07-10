@@ -160,10 +160,18 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         });
 
         $this->socket = new SocketServer('127.0.0.1:0');
+        $this->socket->on('connection', function ($conn) {
+            $func = function () use ($conn) {$conn->close();};
+            $timer = Loop::addTimer(11, $func);
+            $conn->on('data', function ($data) use (&$timer, $func) {
+                Loop::cancelTimer($timer);
+                $timer = Loop::addTimer(11, $func);
+            });
+        });
+
         $http->listen($this->socket);
 
         $this->base = str_replace('tcp:', 'http:', $this->socket->getAddress()) . '/';
-        error_log((string)$this->socket->getAddress());
     }
 
     /**
@@ -351,7 +359,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $browser = $this->browser->withFollowRedirects(0);
 
         $this->setExpectedException('RuntimeException');
-        \React\Async\await($browser->get($this->base . 'redirect-to?url=get', ['Connection' => 'close']));
+        \React\Async\await($browser->get($this->base . 'redirect-to?url=get'));
     }
 
     public function testResponseStatus204ShouldResolveWithEmptyBody()
