@@ -61,7 +61,7 @@ class Browser {
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
-        CURLOPT_VERBOSE => true,
+        //CURLOPT_VERBOSE => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
