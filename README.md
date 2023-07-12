@@ -1,14 +1,14 @@
 # reactphp-http-browser-curl
 Implementation of an Async HTTP client using CURL.
 
-*** NOTE *** This is a work in progress, Not 100% compatiable replacement for ReactPHP Browser
+*** NOTE *** This is a work in progress, Not 100% compatible replacement for ReactPHP Browser
 
 ## Why not use package react/http Browser?
 Using cURL allows for HTTP/2+3, and the extraction of timing data for the requests. This functionality is not available though the ReactPHP Browser implementation
 
 ## Requirements
 
-The package is compatible with PHP 8.0+ and requires the cURL extension and [react/event-loop](https://github.com/reactphp/http) library.
+The package is compatible with PHP 8.2+ and requires the cURL extension and [react/event-loop](https://github.com/reactphp/http) library.
 
 ## Installation
 
