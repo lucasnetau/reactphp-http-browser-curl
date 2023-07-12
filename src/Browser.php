@@ -403,7 +403,6 @@ class Browser {
             if ($responseBody === false) {
                 throw new \RuntimeException('Unable to create temporary file for response body');
             }
-            $maxlen = $this->maximumSize;
             curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
                 static $xfer = 0;
                 $len = strlen($data);
@@ -423,7 +422,6 @@ class Browser {
                 fwrite($responseBody, $data);
                 return $len;
             });
-            //curl_setopt($curl, CURLOPT_FILE, $responseBody);
         }
 
         /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
@@ -572,6 +570,14 @@ class Browser {
         if (count($certs) > 0) {
             $headers['X-Certificate'] = $certs[0]['Cert'];
         }
+
+        $headers['X-Connection'] = [
+            "effective_url=" . $info['url'],
+            "connection;count=" . curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
+            "redirect;count=" . curl_getinfo($curl, CURLINFO_REDIRECT_COUNT),
+            "upload;size=" . $info['size_upload'] . ";speed=" . $info['speed_upload'],
+            "download;size=" . $info['size_download'] . ";speed=" . $info['speed_download'],
+        ];
 
         // determine length of response body
         $length = null;
