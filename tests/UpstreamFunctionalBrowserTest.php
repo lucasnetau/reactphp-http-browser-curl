@@ -23,12 +23,15 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     /** @var ?SocketServer */
     private SocketServer|null $socket;
 
+    private SplObjectStorage $connectionList;
+
     /**
      * @before
      */
     public function setUpBrowserAndServer()
     {
-        $this->browser = new Browser();
+        $this->browser = new Browser([CURLOPT_MAXAGE_CONN => 10, CURLOPT_VERBOSE => false]);
+        $this->connectionList = new SplObjectStorage();
 
         $http = new HttpServer(new StreamingRequestMiddleware(), function (ServerRequestInterface $request) {
             $path = $request->getUri()->getPath();
@@ -161,11 +164,16 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->socket = new SocketServer('127.0.0.1:0');
         $this->socket->on('connection', function ($conn) {
+            $this->connectionList->attach($conn);
             $func = function () use ($conn) {$conn->close();};
             $timer = Loop::addTimer(11, $func);
             $conn->on('data', function ($data) use (&$timer, $func) {
                 Loop::cancelTimer($timer);
                 $timer = Loop::addTimer(11, $func);
+            });
+            $conn->on('close', function() use (&$timer, $conn) {
+                Loop::cancelTimer($timer);
+                $this->connectionList->detach($conn);
             });
         });
 
@@ -182,7 +190,12 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         unset($this->browser);
         //error_log('gc' . gc_collect_cycles() + gc_collect_cycles());
 
+        $this->socket->pause();
         $this->socket->close();
+        foreach($this->connectionList as $conn) {
+            $conn->close();
+            $this->connectionList->detach($conn);
+        }
         $this->socket = null;
     }
 
