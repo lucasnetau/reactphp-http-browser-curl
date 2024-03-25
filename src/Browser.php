@@ -40,6 +40,7 @@ use function is_array;
 use function preg_split;
 use function property_exists;
 use function rewind;
+use function str_contains;
 use function stream_get_contents;
 use function stream_set_blocking;
 use function strlen;
@@ -283,7 +284,7 @@ class Browser {
             curl_setopt($curl, CURLOPT_INFILE, $upload->getReadableStream());
             if (array_key_exists('content-length', $headers)) {
                 curl_setopt($curl, CURLOPT_INFILESIZE, $headers['content-length']);
-                $headers['Transfer-Encoding'] = '';
+                $headers['transfer-encoding'] = '';
             }
         } elseif (!in_array($method, ['HEAD','OPTIONS'])) {
             curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
@@ -546,10 +547,16 @@ class Browser {
     }
 
     private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, $body) : ResponseInterface {
+        $redirectCount = curl_getinfo($curl, CURLINFO_REDIRECT_COUNT);
         $headers = [];
         $lines = preg_split('/(\\r?\\n)/', trim($rawHeaders), -1);
         foreach($lines as $headerLine) {
-            if ($headerLine === '' || $headerLine === 'HTTP/1.1 100 Continue') {
+            //If we have followed redirects we need to drop headers from previous requests
+            if ($headerLine === '' && $redirectCount > 0) {
+                $headers = [];
+                continue;
+            }
+            if (!str_contains($headerLine, ':')) { //This will strip the HTTP/code header line
                 continue;
             }
             $parts = explode(':', $headerLine, 2);
@@ -574,7 +581,7 @@ class Browser {
         $headers['X-Connection'] = [
             "effective_url=" . $info['url'],
             "connection;count=" . curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
-            "redirect;count=" . curl_getinfo($curl, CURLINFO_REDIRECT_COUNT),
+            "redirect;count=" . $redirectCount,
             "upload;size=" . $info['size_upload'] . ";speed=" . $info['speed_upload'],
             "download;size=" . $info['size_download'] . ";speed=" . $info['speed_download'],
         ];
