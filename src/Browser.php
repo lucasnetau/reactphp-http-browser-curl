@@ -18,6 +18,7 @@ use React\Stream\ReadableStreamInterface;
 use React\Stream\ThroughStream;
 use RingCentral\Psr7\Uri;
 use Throwable;
+use function array_change_key_case;
 use function array_key_exists;
 use function count;
 use function curl_getinfo;
@@ -310,7 +311,7 @@ class Browser {
 
         $curl_opts[CURLOPT_URL] = $url;
 
-        $headers = $headers + $this->defaultHeaders;
+        $headers = $headers + array_change_key_case($this->defaultHeaders);
 
         if (($headers['connection'] ?? '') === 'close') {
             $curl_opts[CURLOPT_FORBID_REUSE] = true; //Curl keeps the connection open if the server doesn't close even if we said we are closing
