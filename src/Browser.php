@@ -583,8 +583,8 @@ class Browser {
             "effective_url=" . $info['url'],
             "connection;count=" . curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
             "redirect;count=" . $redirectCount,
-            "upload;size=" . $info['size_upload'] . ";speed=" . $info['speed_upload'],
-            "download;size=" . $info['size_download'] . ";speed=" . $info['speed_download'],
+            "upload;size=" . $info['upload_content_length'] . ";speed=" . curl_getinfo($curl, CURLINFO_SPEED_UPLOAD_T),
+            "download;size=" . $info['download_content_length'] . ";speed=" . curl_getinfo($curl, CURLINFO_SPEED_DOWNLOAD_T),
         ];
 
         // determine length of response body
