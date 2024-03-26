@@ -284,7 +284,7 @@ class Browser {
             curl_setopt($curl, CURLOPT_PUT, true);
             curl_setopt($curl, CURLOPT_INFILE, $upload->getReadableStream());
             if (array_key_exists('content-length', $headers)) {
-                curl_setopt($curl, CURLOPT_INFILESIZE, $headers['content-length']);
+                curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
                 $headers['transfer-encoding'] = '';
             }
         } elseif (!in_array($method, ['HEAD','OPTIONS'])) {
