@@ -70,6 +70,7 @@ class FifoStreamWrapper {
             'full' => false,
             'fullcount' => 0,
             'draincount' => 0,
+            'emptycount' => 0,
         ];
 
         return true;
@@ -112,13 +113,14 @@ class FifoStreamWrapper {
 
             self::$bufferInfo[$this->bufferKey]['bytesRead'] += $blockSize;
 
-            if ((self::$bufferInfo[$this->bufferKey]['full']) && self::$bufferInfo[$this->bufferKey]['blockCount'] < (int)ceil($this->maxBlocks/2)) {
+            if ((self::$bufferInfo[$this->bufferKey]['full']) && self::$bufferInfo[$this->bufferKey]['blockCount'] < (int)ceil($this->maxBlocks*0.5)) {
                 ++self::$bufferInfo[$this->bufferKey]['draincount'];
                 self::$bufferInfo[$this->bufferKey]['full'] = false;
                 if (isset($this->drainCallback)) { ($this->drainCallback)();}
             }
 
             if ($blockSize === 0) {
+                ++self::$bufferInfo[$this->bufferKey]['emptycount'];
                 if(isset($this->emptyCallback)) {
                     ($this->emptyCallback)();
                 }
@@ -162,7 +164,7 @@ class FifoStreamWrapper {
             }
 
             $bufferBlockCount += $newDataBlockCount;
-            self::$bufferInfo[$this->bufferKey]['blockCount'] = $bufferBlockCount; //Update out current count
+            self::$bufferInfo[$this->bufferKey]['blockCount'] = $bufferBlockCount; //Update our current block count
 
             $writtenDataBytes = $newDataBlockCount * self::BLOCK_SIZE;
             $lastBlock = $data[array_key_last($data)];
