@@ -52,7 +52,8 @@ class FifoStreamWrapper {
         }
         $this->mode = $mode;
 
-        $this->maxBlocks = (int)floor(100000000 / self::BLOCK_SIZE);
+        //@TODO Use memory_limit to limit size of buffer
+        $this->maxBlocks = (int)floor(10000000 / self::BLOCK_SIZE);
 
         $contextOptions = stream_context_get_options($this->context);
         $fifoOptions = $contextOptions['fifo'] ?? [];
@@ -85,7 +86,6 @@ class FifoStreamWrapper {
 
     function stream_read($count)
     {
-        static $pauseOnNextEmptyRead = false;
         if ($this->mode === 'r') {
             $buffer = $this->buffer;
             if (self::$bufferInfo[$this->bufferKey]['blockCount'] === 0) {
@@ -119,14 +119,12 @@ class FifoStreamWrapper {
             }
 
             if ($blockSize === 0) {
-                if ($pauseOnNextEmptyRead && isset($this->emptyCallback)) {
+                if(isset($this->emptyCallback)) {
                     ($this->emptyCallback)();
                 }
-                $pauseOnNextEmptyRead = true;
                 return false; //No data available
             }
 
-            $pauseOnNextEmptyRead = false;
             return $block;
         }
         return null;
@@ -239,12 +237,21 @@ class FifoStreamWrapper {
     {
         unset($this->buffer);
         if ($this->mode === 'w') {
+            //If writer we can close but keep reading buffer around
             self::$hasWriter[$this->bufferKey] = false;
-        } elseif (!(self::$hasWriter[$this->bufferKey] ?? false)) {
+        } elseif (!(self::$hasWriter[$this->bufferKey] ?? false) && array_key_exists($this->bufferKey, self::$buffers)) {
+            //If reader we cleanup on close if no writer
+            if (self::$bufferInfo[$this->bufferKey]['blockCount'] !== 0) {
+                trigger_error('FIFO Stream closed before all data read', E_USER_WARNING);
+            }
             unset(self::$buffers[$this->bufferKey]);
             unset(self::$bufferInfo[$this->bufferKey]);
         }
+    }
 
+    public function __destruct()
+    {
+        $this->stream_close();
     }
 }
 
