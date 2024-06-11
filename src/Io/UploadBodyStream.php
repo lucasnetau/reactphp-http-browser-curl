@@ -20,9 +20,11 @@ class UploadBodyStream extends EventEmitter {
         $that = $this;
         $writeContext = [
             'fifo' => [
+                //FIFO drained below low water mark, resume input
                 'onDrain' => static function() use ($input) {
                     $input->emit('data', ['']);
                 },
+                //FIFO contains data, resume the cURL upload
                 'onAvailable' => static function() use ($that) {
                     $that->emit('continue');
                 },
@@ -31,9 +33,10 @@ class UploadBodyStream extends EventEmitter {
 
         $readContext = [
             'fifo' => [
+                //When FIFO is empty we pause cURL upload and resume writing of the input body to the FIFO
                 'onEmpty' => static function() use ($input, $that) {
                     $that->emit('pause');
-                    $input->resume();
+                    $input->emit('data', ['']);
                 },
             ]
         ];
