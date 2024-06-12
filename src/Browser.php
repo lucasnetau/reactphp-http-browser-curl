@@ -6,6 +6,7 @@ use CurlHandle;
 use CurlMultiHandle;
 use EdgeTelemetrics\React\Http\Io\UploadBodyStream;
 use Fig\Http\Message\StatusCodeInterface;
+use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
 use React\Http\Io\ReadableBodyStream;
@@ -16,7 +17,7 @@ use React\Promise\PromiseInterface;
 use React\Stream\ReadableStreamInterface;
 
 use React\Stream\ThroughStream;
-use RingCentral\Psr7\Uri;
+use React\Http\Message\Uri;
 use Throwable;
 use function array_change_key_case;
 use function array_key_exists;
@@ -38,6 +39,7 @@ use function curl_strerror;
 use function fopen;
 use function in_array;
 use function is_array;
+use function is_resource;
 use function preg_split;
 use function property_exists;
 use function rewind;
@@ -256,7 +258,7 @@ class Browser {
     {
         if ($this->baseUrl !== null) {
             // ensure we're actually below the base URL
-            $url = Uri::resolve($this->baseUrl, $url);
+            $url = Uri::resolve(new Uri($this->baseUrl), new Uri($url));
         } else {
             $url = new Uri($url);
             if ($url->getHost() === '') {
@@ -527,10 +529,10 @@ class Browser {
     private function resolveResponse($mh, $curl): void
     {
         $responseBody = $this->inProgress[$mh]->file;
-        if (!($responseBody instanceof ThroughStream)) {
+        if (is_resource($responseBody)) {
             stream_set_blocking($responseBody, false);
             rewind($responseBody);
-            $responseBody = \RingCentral\Psr7\stream_for($responseBody);
+            $responseBody = Utils::streamFor($responseBody);
         }
 
         /** @var resource $responseHeaderHandle */
