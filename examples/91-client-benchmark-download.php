@@ -30,7 +30,7 @@ echo 'Requesting ' . $url . '…' . PHP_EOL;
 $time = microtime(true);
 $client->requestStreaming('GET', $url)->then(function (ResponseInterface $response) use ($time) {
     echo 'Headers received' . PHP_EOL;
-    echo RingCentral\Psr7\str($response);
+    echo (string)$response->getBody();
 
     $stream = $response->getBody();
     assert($stream instanceof ReadableStreamInterface);
