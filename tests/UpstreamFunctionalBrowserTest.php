@@ -296,10 +296,6 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $base = str_replace('://', '://unknown:invalid@', $this->base);
         $target = str_replace('://', '://user:pass@', $this->base) . 'basic-auth/user/pass';
 
-        error_log($target);
-        error_log($base);
-        error_log($base . 'redirect-to?url=' . urlencode($target));
-
         \React\Async\await($this->browser->get($base . 'redirect-to?url=' . urlencode($target)));
     }
 
@@ -412,7 +408,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->setExpectedException(
             'OverflowException',
             'Response body size of 5 bytes exceeds maximum of 4 bytes',
-            defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 0
+            defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 90
         );
         \React\Async\await($promise);
     }
@@ -493,6 +489,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     public function testPostString()
     {
         $response = \React\Async\await($this->browser->post($this->base . 'post', array(), 'hello world'));
+
         $data = json_decode((string)$response->getBody(), true);
 
         $this->assertEquals('hello world', $data['data']);
@@ -732,6 +729,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
 
         $response = \React\Async\await($this->browser->withProtocolVersion('1.0')->get($this->base));
+
         $this->assertEquals('1.0', (string)$response->getBody());
 
         $socket->close();
