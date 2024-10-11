@@ -66,6 +66,7 @@ class Browser {
         CURLOPT_TCP_NODELAY => true,
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
         //CURLOPT_VERBOSE => true,
+        //CURLINFO_HEADER_OUT => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
 
@@ -581,13 +582,14 @@ class Browser {
             $headers['X-Certificate'] = $certs[0]['Cert'];
         }
 
+        $uploadSize = $info['request_size'] + $info['size_upload'];
         $downloadSize = $info['header_size'] + $info['size_download'];
 
         $headers['X-Connection'] = [
             "effective_url=" . $info['url'],
             "connection;count=" . curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
             "redirect;count=" . $redirectCount,
-            "upload;size=" . $info['size_upload'] . ";speed=" . curl_getinfo($curl, CURLINFO_SPEED_UPLOAD_T),
+            "upload;size=$uploadSize;speed=" . curl_getinfo($curl, CURLINFO_SPEED_UPLOAD_T),
             "download;size=$downloadSize;speed=" . curl_getinfo($curl, CURLINFO_SPEED_DOWNLOAD_T),
         ];
 
