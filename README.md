@@ -4,7 +4,7 @@ Implementation of an Async HTTP client using CURL.
 *** NOTE *** This is a work in progress, Not 100% compatible replacement for ReactPHP Browser
 
 ## Why not use package react/http Browser?
-Using cURL allows for HTTP/2+3, and the extraction of timing data for the requests. This functionality is not available though the ReactPHP Browser implementation
+Using cURL allows for HTTP/2+3, connection pooling (with keep-alive), and the extraction of timing data for the requests. This functionality is not available though the ReactPHP Browser implementation
 
 ## Requirements
 
@@ -34,6 +34,34 @@ $browser = new Browser([
     CURLOPT_DNS_SERVERS => '1.1.1.1',
 ]);
 ```
+
+### Connection Reuse
+Each instance of Browser shares a Connection pool, DNS cache, SSL cache, and Cookie Jar. An example of this can be seen in [/examples/connection_pooling.php](/examples/connection_pooling.php) script.
+
+## Connection Metadata
+### Connection Timing
+The request/response timing is provided though the header '`ServerTiming`' in the Response object.
+
+Each timing point is defined as `<timing point>;dur=<duration in second>`
+
+* namelookup_time
+* connect_time
+* appconnect_time
+* pretransfer_time
+* redirect_time
+* starttransfer_time
+* total_time
+
+### Connection Details
+Additional request/response metadata is provided though the header '`X-Connection`' in the Response object.
+
+Key/Value pairs are as follows:
+
+* effective_url=`<final url after any redirects>`
+* connection;count=`<number of connections opened during the request, 0 if existing connection reused>`
+* redirect;count=`<number of redirects followed>`
+* upload;size=`<bytes sent in request(headers+body) including redirects>`;speed=`<overall bytes per second upload>`
+* download;size=`<bytes received in response(headers+body) including redirects>`;speed=`<overall bytes per second download>`
 
 ## License
 
