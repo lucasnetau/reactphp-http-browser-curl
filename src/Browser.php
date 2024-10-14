@@ -29,14 +29,18 @@ use function curl_multi_close;
 use function curl_multi_exec;
 use function curl_multi_info_read;
 use function curl_multi_init;
+use function curl_multi_select;
 use function curl_multi_strerror;
 use function curl_pause;
 use function curl_setopt;
 use function curl_setopt_array;
-use function curl_share_close;
+use function curl_share_init;
 use function curl_share_setopt;
 use function curl_strerror;
+use function explode;
 use function fopen;
+use function fwrite;
+use function implode;
 use function in_array;
 use function is_array;
 use function is_resource;
@@ -49,6 +53,7 @@ use function stream_set_blocking;
 use function strlen;
 use function strtolower;
 use function strtoupper;
+use function trim;
 
 class Browser {
     protected bool $disableCurlCache = false;
@@ -415,12 +420,12 @@ class Browser {
 
                 if ($xfer > $this->maximumSize) {
                     $transaction = $this->inProgress[$multi];
+                    unset($this->inProgress[$multi]);
                     $transaction->deferred->reject(new \OverflowException(
                         'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
                         \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
                     ));
-                    unset($transaction);
-                    unset($this->inProgress[$multi]);
+                    $transaction->close();
                     return 0;
                 }
 
@@ -458,7 +463,11 @@ class Browser {
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
             $deferred->reject(new \RuntimeException('Request cancelled'));
-            unset($this->inProgress[$multi]);
+            if ($this->inProgress->contains($multi)) {
+                $transaction = $this->inProgress[$multi];
+                unset($this->inProgress[$multi]);
+                $transaction->close();
+            }
         });
 
         $this->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);
@@ -494,8 +503,8 @@ class Browser {
             $info = curl_multi_info_read($mh);
             if ($info === false) {
                 unset($this->inProgress[$mh]);
-                unset($transaction);
                 $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
+                $transaction->close();
                 continue;
             }
             $curl = $transaction->curl;
@@ -503,18 +512,24 @@ class Browser {
             if ($transaction->file instanceof ThroughStream) {
                 $transaction->file->end();
             }
-            unset($transaction);
 
             if ($info['result'] === CURLE_OK) {
-                $this->resolveResponse($mh, $curl);
+                try {
+                    $res = $this->resolveResponse($mh, $curl);
+                    unset($this->inProgress[$mh]);
+                    $deferred->resolve($res);
+                } catch (Throwable $ex) {
+                    $deferred->reject($ex);
+                }
             } else {
+                unset($this->inProgress[$mh]);
                 if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
                     $deferred->reject(new \RuntimeException('Request timed out after ' . $this->timeout . ' seconds'), CURLE_OPERATION_TIMEDOUT);
                 } else {
                     $deferred->reject(new \RuntimeException(curl_strerror($info['result']), $info['result']));
                 }
             }
-            unset($this->inProgress[$mh]);
+            $transaction->close();
         }
 
         if (count($this->inProgress)) {
@@ -527,7 +542,7 @@ class Browser {
         }
     }
 
-    private function resolveResponse($mh, $curl): void
+    private function resolveResponse($mh, $curl): ResponseInterface
     {
         $responseBody = $this->inProgress[$mh]->file;
         if (is_resource($responseBody)) {
@@ -541,13 +556,7 @@ class Browser {
         rewind($responseHeaderHandle);
         $headers = stream_get_contents($responseHeaderHandle);
         //@TODO implement ReactPHP Browser withRejectErrorResponse support
-        $deferred = $this->inProgress[$mh]->deferred;
-        try {
-            $res = $this->constructResponseFromCurl($curl, $headers, $responseBody);
-            $deferred->resolve($res);
-        } catch (Throwable $ex) {
-            $deferred->reject($ex);
-        }
+        return $this->constructResponseFromCurl($curl, $headers, $responseBody);
     }
 
     private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, $body) : ResponseInterface {
@@ -627,11 +636,15 @@ class Browser {
         return $response;
     }
 
-    public function __destruct() {
+    public function cancelAll() : void {
         foreach($this->inProgress as $mh) {
+            $transaction = $this->inProgress[$mh];
             unset($this->inProgress[$mh]);
+            $transaction->close();
         }
-        curl_share_close($this->curlShare);
-        unset($this->curlShare);
+    }
+
+    public function __destruct() {
+        $this->cancelAll();
     }
 }

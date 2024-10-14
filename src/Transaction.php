@@ -23,13 +23,14 @@ class Transaction {
 
     public string $status = self::STATUS_CONNECTING;
 
+    protected bool $closed = false;
+
     public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {
 
     }
 
-    public function __destruct() {
-        if (isset($this->multi)) {
-            $this->deferred->promise()->cancel();
+    public function close() : void {
+        if (!$this->closed) {
             curl_pause($this->curl, CURLPAUSE_CONT);
             curl_multi_remove_handle($this->multi, $this->curl);
             curl_multi_close($this->multi);
@@ -40,10 +41,19 @@ class Transaction {
             unset($this->multi);
             unset($this->curl);
             fclose($this->headers);
-            if(is_resource($this->file)) {
+            if (is_resource($this->file)) {
                 fclose($this->file);
             }
+            $this->closed = true;
         }
+        if (isset($this->deferred)) {
+            $this->deferred->promise()->cancel();
+            unset($this->deferred);
+        }
+    }
+
+    public function __destruct() {
+        $this->close();
     }
 
 }
