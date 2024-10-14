@@ -425,7 +425,6 @@ class Browser {
                         'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
                         \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
                     ));
-                    $transaction->close();
                     return 0;
                 }
 
