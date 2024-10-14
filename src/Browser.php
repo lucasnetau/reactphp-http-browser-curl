@@ -494,7 +494,7 @@ class Browser {
         $nextIterationTimeout = 0.1; //100ms suggested by Curl
         foreach($this->inProgress as $mh) {
             $transaction = $this->inProgress[$mh];
-            if ($transaction->closed) {
+            if ($transaction->isClosed()) {
                 unset($this->inProgress[$mh]);
                 continue;
             }

@@ -12,7 +12,7 @@ use function curl_setopt;
 use function fclose;
 use function is_resource;
 
-class Transaction {
+final class Transaction {
 
     const STATUS_CONNECTING = 'connecting';
     const STATUS_UPLOADING = 'uploading';
@@ -23,7 +23,7 @@ class Transaction {
 
     public string $status = self::STATUS_CONNECTING;
 
-    protected bool $closed = false;
+    private bool $closed = false;
 
     public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {
 
@@ -50,6 +50,10 @@ class Transaction {
             $this->deferred->promise()->cancel();
             unset($this->deferred);
         }
+    }
+
+    public function isClosed() : bool {
+        return $this->closed;
     }
 
     public function __destruct() {
