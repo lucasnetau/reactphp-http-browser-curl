@@ -197,4 +197,24 @@ x    }*/
         $this->assertTrue($browser->isIdle());
     }
 
+    public function testBrowserIdleBeforePromiseResolve()
+    {
+        $browser = $this->browser;
+
+        $promise = $browser->get($this->testServerAddress . '/helloworld');
+        $this->assertFalse($browser->isIdle());
+
+        $answer = null;
+        $promise->then(function ($result) use (&$answer, $browser) {
+            $answer = $browser->isIdle();
+        }, 'print_r')->always(function() {
+            Loop::stop();
+        });
+
+        Loop::run();
+
+        $this->assertTrue($answer);
+        $this->assertTrue($browser->isIdle());
+    }
+
 }
