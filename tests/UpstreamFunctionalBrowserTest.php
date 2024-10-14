@@ -415,7 +415,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
     public function testGetRequestWithResponseBufferExceededDuringStreamingRejects()
     {
-        $this->markTestSkipped('error is wonky');
+        $this->markTestSkipped('We reject with Response body size of X bytes exceeds maximum of 4 bytes due to cURL handling');
         $promise = $this->browser->withResponseBuffer(4)->get($this->base . 'stream/1');
 
         $this->setExpectedException(
