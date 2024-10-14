@@ -401,7 +401,13 @@ class Browser {
             curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
                 static $first = true;
                 if ($first) {
-                    $this->resolveResponse($multi, $curl);
+                    try {
+                        $transaction = $this->inProgress[$multi];
+                        $res = $this->resolveResponse($multi, $curl);
+                        $transaction->deferred->resolve($res);
+                    } catch (Throwable $ex) {
+                        $transaction->deferred->reject($ex);
+                    }
                     $first = false;
                 }
 
