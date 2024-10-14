@@ -467,10 +467,12 @@ class Browser {
         });
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
-            $deferred->reject(new \RuntimeException('Request cancelled'));
             if ($this->inProgress->contains($multi)) {
                 $transaction = $this->inProgress[$multi];
                 unset($this->inProgress[$multi]);
+            }
+            $deferred->reject(new \RuntimeException('Request cancelled'));
+            if (isset($transaction)) {
                 $transaction->close();
             }
         });
@@ -492,6 +494,10 @@ class Browser {
         $nextIterationTimeout = 0.1; //100ms suggested by Curl
         foreach($this->inProgress as $mh) {
             $transaction = $this->inProgress[$mh];
+            if ($transaction->closed) {
+                unset($this->inProgress[$mh]);
+                continue;
+            }
             curl_multi_exec($mh, $still_running);
             if ($still_running) {
                 if ($nextIterationTimeout !== 0) {
