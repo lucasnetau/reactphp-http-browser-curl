@@ -8,6 +8,7 @@ use EdgeTelemetrics\React\Http\Io\UploadBodyStream;
 use Fig\Http\Message\StatusCodeInterface;
 use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\StreamInterface;
 use React\EventLoop;
 use React\Http\Io\HttpBodyStream;
 use React\Http\Message\ResponseException;
@@ -562,7 +563,12 @@ class Browser {
         }
     }
 
-    private function resolveResponse($mh, $curl): ResponseInterface
+    /**
+     * @param CurlMultiHandle $mh
+     * @param CurlHandle $curl
+     * @return ResponseInterface
+     */
+    private function resolveResponse(CurlMultiHandle $mh, CurlHandle $curl): ResponseInterface
     {
         $responseBody = $this->inProgress[$mh]->file;
         if (is_resource($responseBody)) {
@@ -579,7 +585,13 @@ class Browser {
         return $this->constructResponseFromCurl($curl, $headers, $responseBody);
     }
 
-    private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, $body) : ResponseInterface {
+    /**
+     * @param CurlHandle $curl
+     * @param string $rawHeaders
+     * @param ThroughStream|StreamInterface $body
+     * @return ResponseInterface
+     */
+    private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, ThroughStream|StreamInterface $body) : ResponseInterface {
         $redirectCount = curl_getinfo($curl, CURLINFO_REDIRECT_COUNT);
         $headers = [];
         $lines = preg_split('/(\\r?\\n)/', trim($rawHeaders), -1);
