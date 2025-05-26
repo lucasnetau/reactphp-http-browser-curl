@@ -9,7 +9,7 @@ use Fig\Http\Message\StatusCodeInterface;
 use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Message\ResponseInterface;
 use React\EventLoop;
-use React\Http\Io\ReadableBodyStream;
+use React\Http\Io\HttpBodyStream;
 use React\Http\Message\ResponseException;
 use React\Promise;
 use React\Promise\Deferred;
@@ -623,7 +623,7 @@ class Browser {
         }
 
         if ($body instanceof ThroughStream) {
-            $body = new ReadableBodyStream($body, $length);
+            $body = new HttpBodyStream($body, $length);
         }
 
         $httpVersion = match(curl_getinfo($curl, CURLINFO_HTTP_VERSION)) {
