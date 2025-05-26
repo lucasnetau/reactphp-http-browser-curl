@@ -19,6 +19,7 @@ use React\Stream\ReadableStreamInterface;
 use React\Stream\ThroughStream;
 use React\Http\Message\Uri;
 use Throwable;
+use ValueError;
 use function array_change_key_case;
 use function array_key_exists;
 use function count;
@@ -74,7 +75,6 @@ class Browser {
         //CURLINFO_HEADER_OUT => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
     ];
-
 
     protected array $defaultHeaders = [
         'User-Agent' => 'EdgeTelemetricsBrowser/1',
@@ -356,7 +356,7 @@ class Browser {
     private function initCurl() : CurlHandle {
         $curl = curl_init();
 
-        if ($curl === false || $curl === null) {
+        if (!$curl) {
             throw new \RuntimeException('Unable to init curl');
         }
 
@@ -369,7 +369,16 @@ class Browser {
             curl_setopt($curl, CURLOPT_SHARE, $this->curlShare);
         }
 
-        curl_setopt_array($curl, $options);
+        try {
+            error_clear_last();
+            @curl_setopt_array($curl, $options);
+            if (error_get_last()) {
+                //Capture malformed options that result in conversion errors like "Array to string conversion"
+                throw new \RuntimeException('One or more cURL options values were invalid');
+            }
+        } catch (ValueError $e) {
+            throw new \RuntimeException('Invalid cURL options keys provided');
+        }
 
         return $curl;
     }
