@@ -25,8 +25,10 @@ final class Transaction {
 
     private bool $closed = false;
 
-    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {
+    public readonly float $start;
 
+    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {
+        $this->start = hrtime(true);
     }
 
     public function close() : void {

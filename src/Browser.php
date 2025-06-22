@@ -49,6 +49,7 @@ use function is_resource;
 use function preg_split;
 use function property_exists;
 use function rewind;
+use function round;
 use function str_contains;
 use function stream_get_contents;
 use function stream_set_blocking;
@@ -545,7 +546,7 @@ class Browser {
             } else {
                 unset($this->inProgress[$mh]);
                 if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
-                    $deferred->reject(new \RuntimeException('Request timed out after ' . $this->timeout . ' seconds'), CURLE_OPERATION_TIMEDOUT);
+                    $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
                 } else {
                     $deferred->reject(new \RuntimeException(curl_strerror($info['result']), $info['result']));
                 }
