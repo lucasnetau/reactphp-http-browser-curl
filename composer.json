@@ -1,6 +1,6 @@
 {
   "name": "edgetelemetrics/reactphp-http-browser-curl",
-  "description": "An async http client using Curl and Fibers",
+  "description": "An async http client using Curl",
   "minimum-stability": "stable",
   "license": "MIT",
   "type": "library",
