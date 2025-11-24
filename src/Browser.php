@@ -45,6 +45,7 @@ use function fwrite;
 use function implode;
 use function in_array;
 use function is_array;
+use function is_int;
 use function is_resource;
 use function preg_split;
 use function property_exists;
@@ -281,6 +282,14 @@ class Browser {
         $curl = $this->initCurl();
 
         $headers = array_change_key_case($headers, CASE_LOWER);
+
+        //If we have been passed an array of headers in "Content-Type: application/json" convert to our Header => Value format
+        foreach($headers as $key => $value) {
+            if (is_int($key) && str_contains($value, ":")) {
+                [$header, $value] = explode(":", $value, 2);
+                $headers[strtolower($header)] = $value;
+            }
+        }
 
         if ($body instanceof ReadableStreamInterface ) {
             $upload = new UploadBodyStream($body);
