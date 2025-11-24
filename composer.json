@@ -13,13 +13,13 @@
   "require": {
     "php": "^8.2",
     "react/event-loop": "^1.2",
+    "react/http": "v1.10.0",
     "ext-curl": "*",
     "psr/http-message":"^1.0.1",
     "guzzlehttp/psr7": "^2.6"
   },
   "require-dev": {
     "phpunit/phpunit": "^9.5",
-    "react/http": "^1.10",
     "react/dns": "*",
     "react/async": "^4 || ^3 || ^2",
     "react/promise-stream": "^1.4",
