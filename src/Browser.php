@@ -288,6 +288,7 @@ class Browser {
             if (is_int($key) && str_contains($value, ":")) {
                 [$header, $value] = explode(":", $value, 2);
                 $headers[strtolower($header)] = $value;
+                unset($headers[$key]);
             }
         }
 
