@@ -4,7 +4,6 @@ namespace EdgeTelemetrics\React\Http;
 
 use CurlHandle;
 use React\Promise\Deferred;
-use function curl_close;
 use function curl_multi_close;
 use function curl_multi_remove_handle;
 use function curl_pause;
@@ -39,7 +38,6 @@ final class Transaction {
             curl_setopt($this->curl, CURLOPT_XFERINFOFUNCTION, null);
             curl_setopt($this->curl, CURLOPT_WRITEFUNCTION, null);
             curl_setopt($this->curl, CURLOPT_INFILE, null);
-            curl_close($this->curl);
             unset($this->multi);
             unset($this->curl);
             fclose($this->headers);

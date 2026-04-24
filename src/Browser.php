@@ -463,7 +463,7 @@ class Browser {
         /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
         curl_setopt($curl, CURLOPT_NOPROGRESS, 0);
         curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) use ($multi) {
-            if (!$this->inProgress->contains($multi)) {
+            if (!$this->inProgress->offsetExists($multi)) {
                 return 0;
             }
 
@@ -488,7 +488,7 @@ class Browser {
         });
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
-            if ($this->inProgress->contains($multi)) {
+            if ($this->inProgress->offsetExists($multi)) {
                 $transaction = $this->inProgress[$multi];
                 unset($this->inProgress[$multi]);
             }
