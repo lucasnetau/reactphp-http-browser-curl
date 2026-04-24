@@ -164,7 +164,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->socket = new SocketServer('127.0.0.1:0');
         $this->socket->on('connection', function ($conn) {
-            $this->connectionList->attach($conn);
+            $this->connectionList->offsetSet($conn);
             $func = function () use ($conn) {$conn->close();};
             $timer = Loop::addTimer(11, $func);
             $conn->on('data', function ($data) use (&$timer, $func) {
