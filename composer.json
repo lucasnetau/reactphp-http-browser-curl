@@ -13,9 +13,10 @@
   "require": {
     "php": "^8.2",
     "react/event-loop": "^1.2",
-    "react/http": "v1.10.0",
+    "react/http": "^v1.11",
     "ext-curl": "*",
     "psr/http-message":"^1.0.1",
+    "psr/http-client": "^1.0.3",
     "guzzlehttp/psr7": "^2.6"
   },
   "require-dev": {
@@ -24,6 +25,9 @@
     "react/async": "^4 || ^3 || ^2",
     "react/promise-stream": "^1.4",
     "react/promise-timer": "^1.9"
+  },
+  "replace": {
+    "symfony/polyfill-php80": "*"
   },
   "autoload": {
     "psr-4": {
