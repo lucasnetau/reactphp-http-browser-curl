@@ -659,8 +659,13 @@ class Browser {
         $code = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
         if (curl_getinfo($curl, CURLINFO_EFFECTIVE_METHOD) === 'HEAD' || ($code >= 100 && $code < 200) || $code == StatusCodeInterface::STATUS_NO_CONTENT || $code == StatusCodeInterface::STATUS_NOT_MODIFIED) {
             $length = 0;
-        } elseif (array_key_exists('Content-Length', $headers)) {
-            $length = (int)$headers['Content-Length'][0];
+        } else {
+            foreach ($headers as $key => $values) {
+                if (\strcasecmp($key, 'Content-Length') === 0) {
+                    $length = (int)$values[0];
+                    break;
+                }
+            }
         }
 
         if ($body instanceof ThroughStream) {
