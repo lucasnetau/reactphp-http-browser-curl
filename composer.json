@@ -24,7 +24,8 @@
     "react/dns": "*",
     "react/async": "^4 || ^3 || ^2",
     "react/promise-stream": "^1.4",
-    "react/promise-timer": "^1.9"
+    "react/promise-timer": "^1.9",
+    "phpstan/phpstan": "^2.2"
   },
   "autoload": {
     "psr-4": {
