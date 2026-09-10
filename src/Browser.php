@@ -282,15 +282,17 @@ class Browser {
             }
         }
 
+        $method = strtoupper($method);
+
         $curl = $this->initCurl();
 
         $headers = array_change_key_case($headers, CASE_LOWER);
 
         //If we have been passed an array of headers in "Content-Type: application/json" convert to our Header => Value format
         foreach($headers as $key => $value) {
-            if (is_int($key) && str_contains($value, ":")) {
+            if (is_int($key) && \is_string($value) && str_contains($value, ":")) {
                 [$header, $value] = explode(":", $value, 2);
-                $headers[strtolower($header)] = $value;
+                $headers[strtolower(trim($header))] = trim($value);
                 unset($headers[$key]);
             }
         }
@@ -310,11 +312,10 @@ class Browser {
                 curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
                 $headers['transfer-encoding'] = '';
             }
-        } elseif (!in_array($method, ['HEAD','OPTIONS'])) {
+        } elseif (!in_array($method, ['HEAD','OPTIONS'], true)) {
             curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
         }
 
-        $method = strtoupper($method);
         $curl_opts = match($method) {
             'HEAD' => [ CURLOPT_NOBODY => true, ],
             'GET' => [ CURLOPT_HTTPGET => true, ],
@@ -337,7 +338,11 @@ class Browser {
 
         $headers = $headers + array_change_key_case($this->defaultHeaders);
 
-        if (($headers['connection'] ?? '') === 'close') {
+        $connection = $headers['connection'] ?? '';
+        if (is_array($connection)) {
+            $connection = implode(",", $connection);
+        }
+        if (\strcasecmp($connection, 'close') === 0) {
             $curl_opts[CURLOPT_FORBID_REUSE] = true; //Curl keeps the connection open if the server doesn't close even if we said we are closing
         }
 
