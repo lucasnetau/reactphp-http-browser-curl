@@ -431,7 +431,12 @@ class Browser {
                         $res = $this->resolveResponse($multi, $curl);
                         $transaction->deferred->resolve($res);
                     } catch (Throwable $ex) {
-                        $transaction->deferred->reject($ex);
+                        if (isset($transaction->deferred)) {
+                            $transaction->deferred->reject($ex);
+                        } else {
+                            // transaction already cancelled/closed: nothing will end the stream
+                            $responseBody->close();
+                        }
                     }
                     $first = false;
                 }
