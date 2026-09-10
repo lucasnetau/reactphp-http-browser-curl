@@ -325,9 +325,9 @@ class Browser {
 
         $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
 
-        if ($this->timeout !== null && $this->timeout >=1)
+        if ($this->timeout !== null && $this->timeout > 0)
         {
-            $curl_opts[CURLOPT_TIMEOUT_MS] = $this->timeout*1000;
+            $curl_opts[CURLOPT_TIMEOUT_MS] = (int) round($this->timeout * 1000);
         }
 
         $curl_opts[CURLOPT_FOLLOWLOCATION] = $this->followRedirects;

@@ -319,6 +319,19 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         \React\Async\await($promise);
     }
 
+    public function testFractionalTimeoutDelayedResponseShouldReject()
+    {
+        $start = microtime(true);
+        $promise = $this->browser->withTimeout(0.5)->get($this->base . 'delay/10');
+
+        $this->setExpectedException('RuntimeException', 'Request timed out after ');
+        try {
+            \React\Async\await($promise);
+        } finally {
+            $this->assertLessThan(5, microtime(true) - $start);
+        }
+    }
+
     public function testTimeoutDelayedResponseAfterStreamingRequestShouldReject()
     {
         $stream = new ThroughStream();
