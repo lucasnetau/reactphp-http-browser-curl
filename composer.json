@@ -26,9 +26,6 @@
     "react/promise-stream": "^1.4",
     "react/promise-timer": "^1.9"
   },
-  "replace": {
-    "symfony/polyfill-php80": "*"
-  },
   "autoload": {
     "psr-4": {
       "EdgeTelemetrics\\React\\Http\\": "src/"
