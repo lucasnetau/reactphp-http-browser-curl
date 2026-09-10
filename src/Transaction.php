@@ -26,6 +26,13 @@ final class Transaction {
 
     public readonly float $start;
 
+    /**
+     * @param \CurlMultiHandle $multi
+     * @param CurlHandle $curl
+     * @param Deferred $deferred
+     * @param resource $file
+     * @param resource $headers
+     */
     public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {
         $this->start = hrtime(true);
     }

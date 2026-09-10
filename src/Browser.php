@@ -83,6 +83,9 @@ class Browser {
         'User-Agent' => 'EdgeTelemetricsBrowser/1',
     ];
 
+    /**
+     * @var \SplObjectStorage<CurlMultiHandle>
+     */
     private \SplObjectStorage $inProgress;
 
     private bool $streaming = false;
@@ -257,13 +260,13 @@ class Browser {
     }
 
     /**
-     * @param $method
-     * @param $url
+     * @param string $method
+     * @param string $url
      * @param array $headers
      * @param string|ReadableStreamInterface $body
      * @return PromiseInterface
      */
-    public function request($method, $url, array $headers = [], string|ReadableStreamInterface $body = ''): PromiseInterface
+    public function request(string $method, string $url, array $headers = [], string|ReadableStreamInterface $body = ''): PromiseInterface
     {
         if ($this->baseUrl !== null) {
             // ensure we're actually below the base URL
@@ -316,7 +319,8 @@ class Browser {
             'HEAD' => [ CURLOPT_NOBODY => true, ],
             'GET' => [ CURLOPT_HTTPGET => true, ],
             'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, ],
-            'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ]
+            'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ],
+            default => throw new \RuntimeException("Unsupported HTTP METHOD $method")
         };
 
         $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
@@ -329,7 +333,7 @@ class Browser {
         $curl_opts[CURLOPT_FOLLOWLOCATION] = $this->followRedirects;
         $curl_opts[CURLOPT_MAXREDIRS] = $this->maxRedirects;
 
-        $curl_opts[CURLOPT_URL] = $url;
+        $curl_opts[CURLOPT_URL] = (string)$url;
 
         $headers = $headers + array_change_key_case($this->defaultHeaders);
 
