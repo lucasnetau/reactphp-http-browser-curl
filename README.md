@@ -30,10 +30,13 @@ The Browser can be configured with standard CURLOPT_* parameters given via the c
 ```php
 $browser = new Browser([
     CURLOPT_TIMEOUT => 20,
-    CURLOPT_DOH_URL, 'https://1.1.1.1/dns-query',
+    CURLOPT_DOH_URL => 'https://1.1.1.1/dns-query',
     CURLOPT_DNS_SERVERS => '1.1.1.1',
 ]);
 ```
+
+### Security
+Only `http://` and `https://` request URLs are accepted; any other scheme is rejected with an `InvalidArgumentException`. As a defence in depth, `CURLOPT_PROTOCOLS` and `CURLOPT_REDIR_PROTOCOLS` default to `CURLPROTO_HTTP | CURLPROTO_HTTPS`, so redirects to schemes such as `file://` are blocked as well. Passing your own `CURLOPT_PROTOCOLS` / `CURLOPT_REDIR_PROTOCOLS` to the constructor overrides the cURL-level restriction (the request URL itself must still be HTTP(S)).
 
 ### Connection Reuse
 Each instance of Browser shares a Connection pool, DNS cache, SSL cache, and Cookie Jar. An example of this can be seen in [/examples/connection_pooling.php](/examples/connection_pooling.php) script.
