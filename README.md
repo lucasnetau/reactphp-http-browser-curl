@@ -1,8 +1,6 @@
 # reactphp-http-browser-curl
 Implementation of an Async HTTP client using CURL.
 
-*** NOTE *** This is a work in progress, Not 100% compatible replacement for ReactPHP Browser
-
 ## Why not use package react/http Browser?
 Using cURL allows for HTTP/2+3, connection pooling (with keep-alive), and the extraction of timing data for the requests. This functionality is not available though the ReactPHP Browser implementation
 
@@ -35,6 +33,19 @@ $browser = new Browser([
 ]);
 ```
 
+### Request methods
+
+`get()`, `head()`, `post()`, `put()`, `patch()`, `delete()` and `options()` are provided as convenience methods. `request($method, $url, $headers, $body)` and `requestStreaming()` accept any valid HTTP method: `TRACE`, `QUERY`, WebDAV methods such as `PROPFIND`/`MKCOL`, and any other RFC 7230 token, all sent verbatim. `HEAD` and `TRACE` never send a request body (RFC 9110). `CONNECT` is rejected with an `InvalidArgumentException`, as it creates a tunnel rather than a request/response exchange.
+
+The Browser also implements PSR-18 `Psr\Http\Client\ClientInterface`, so it can be used where a synchronous PSR-18 client is expected:
+
+```php
+$request = new GuzzleHttp\Psr7\Request('QUERY', $url, [], $body);
+$response = $browser->sendRequest($request); // blocks by driving the event loop
+```
+
+Transport failures throw `EdgeTelemetrics\React\Http\Io\NetworkException` and invalid requests throw `EdgeTelemetrics\React\Http\Io\RequestException`; 4xx/5xx responses are returned rather than thrown.
+
 ### Security
 Only `http://` and `https://` request URLs are accepted; any other scheme is rejected with an `InvalidArgumentException`. As a defence in depth, `CURLOPT_PROTOCOLS` and `CURLOPT_REDIR_PROTOCOLS` default to `CURLPROTO_HTTP | CURLPROTO_HTTPS`, so redirects to schemes such as `file://` are blocked as well. Passing your own `CURLOPT_PROTOCOLS` / `CURLOPT_REDIR_PROTOCOLS` to the constructor overrides the cURL-level restriction (the request URL itself must still be HTTP(S)).
 
@@ -42,6 +53,15 @@ Only `http://` and `https://` request URLs are accepted; any other scheme is rej
 
 ### Timeouts
 Requests use PHP's `default_socket_timeout` (60 seconds by default) when no explicit timeout is set. Use `$browser->withTimeout(5)` for a custom value, `$browser->withTimeout(true)` to re-enable the default, or `$browser->withTimeout(false)` to disable timeouts entirely. A `CURLOPT_TIMEOUT` / `CURLOPT_TIMEOUT_MS` passed to the constructor takes precedence over the default.
+
+### Response compression
+Response bodies are returned exactly as sent; no `Accept-Encoding` header is sent by default. To let cURL negotiate and transparently decode compressed responses, pass `CURLOPT_ACCEPT_ENCODING` in the constructor:
+
+```php
+$browser = new Browser([CURLOPT_ACCEPT_ENCODING => '']);
+```
+
+Note that cURL decodes the body but the response headers still describe the compressed wire format (`Content-Encoding`, `Content-Length`), so the `Content-Length` header and the streaming body's `getSize()` may not match the decoded body length.
 
 ### Connection Reuse
 Each instance of Browser shares a Connection pool, DNS cache, SSL cache, and Cookie Jar. An example of this can be seen in [/examples/connection_pooling.php](/examples/connection_pooling.php) script.

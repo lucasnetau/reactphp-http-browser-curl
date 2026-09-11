@@ -3,6 +3,8 @@
 namespace EdgeTelemetrics\React\Http\Tests;
 
 use EdgeTelemetrics\React\Http\Browser;
+use EdgeTelemetrics\React\Http\Io\NetworkException;
+use EdgeTelemetrics\React\Http\Io\RequestException;
 use Fig\Http\Message\StatusCodeInterface;
 use Psr\Http\Message\ResponseInterface;
 use React\EventLoop\Loop;
@@ -33,6 +35,21 @@ class FunctionalTest extends \React\Tests\Http\TestCase
                 try {
                     $path = $request->getUri()->getPath();
                     $method = $request->getMethod();
+
+                    if ($path === '/echo') {
+                        return Response::json([
+                            'method' => $method,
+                            'body' => (string)$request->getBody(),
+                        ]);
+                    }
+
+                    if ($path === '/gzip') {
+                        return new Response(
+                            StatusCodeInterface::STATUS_OK,
+                            ['Content-Type' => 'text/plain', 'Content-Encoding' => 'gzip'],
+                            (string)gzencode('compressed payload')
+                        );
+                    }
 
                     if ($method === 'GET') {
                         return match ($path) {
@@ -288,4 +305,130 @@ class FunctionalTest extends \React\Tests\Http\TestCase
            $this->assertBrowserLeavesNoCycles($browser);
        }
 
+    public function methodAndBodyProvider(): array
+    {
+        return [
+            'POST' => ['POST', 'body-post'],
+            'PUT' => ['PUT', 'body-put'],
+            'DELETE' => ['DELETE', 'body-delete'],
+            'PATCH' => ['PATCH', 'body-patch'],
+            'QUERY' => ['QUERY', 'body-query'],
+            'WebDAV PROPFIND' => ['PROPFIND', 'body-propfind'],
+        ];
     }
+
+    /** @dataProvider methodAndBodyProvider */
+    public function testRequestSendsMethodAndBodyVerbatim(string $method, string $body): void
+    {
+        $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->request($method, self::$testServerAddress . '/echo', [], $body));
+
+        $this->assertSame(['method' => $method, 'body' => $body], json_decode((string)$response->getBody(), true));
+    }
+
+    public function testGetRequestWithBodySendsBody(): void
+    {
+        $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->request('GET', self::$testServerAddress . '/echo', [], 'get-body'));
+
+        $this->assertSame(['method' => 'GET', 'body' => 'get-body'], json_decode((string)$response->getBody(), true));
+    }
+
+    public function testOptionsRequestReturnsResponseBody(): void
+    {
+        $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->options(self::$testServerAddress . '/echo'));
+
+        $this->assertSame('OPTIONS', json_decode((string)$response->getBody(), true)['method']);
+    }
+
+    public function testTraceRequestIsSentWithoutBody(): void
+    {
+        $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->request('TRACE', self::$testServerAddress . '/echo', [], 'ignored'));
+
+        $this->assertSame(['method' => 'TRACE', 'body' => ''], json_decode((string)$response->getBody(), true));
+    }
+
+    public function testConnectMethodIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Unsupported HTTP method CONNECT');
+
+        \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->request('CONNECT', self::$testServerAddress . '/echo'));
+    }
+
+    public function testInvalidMethodTokenIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid HTTP method given');
+
+        \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->request("GET / HTTP/1.1", self::$testServerAddress . '/echo'));
+    }
+
+    public function invalidResponseBufferSizes(): array
+    {
+        return [[0], [-1], [1.5], ['16']];
+    }
+
+    /** @dataProvider invalidResponseBufferSizes */
+    public function testWithResponseBufferRejectsInvalidSizes(int|float|string $size): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        (new Browser())->withResponseBuffer($size);
+    }
+
+    public function testResponseCompressionIsDecodedWhenAcceptEncodingRequested(): void
+    {
+        $browser = new Browser([CURLOPT_ACCEPT_ENCODING => '']);
+        $response = \React\Async\await($browser->get(self::$testServerAddress . '/gzip'));
+
+        $this->assertSame('compressed payload', (string)$response->getBody());
+    }
+
+    public function testResponseCompressionIsNotDecodedByDefault(): void
+    {
+        $response = \React\Async\await((new Browser())->get(self::$testServerAddress . '/gzip'));
+
+        $this->assertSame('gzip', $response->getHeaderLine('Content-Encoding'));
+        $this->assertNotSame('compressed payload', (string)$response->getBody());
+    }
+
+    public function testSendRequestImplementsPsr18(): void
+    {
+        $request = new \GuzzleHttp\Psr7\Request('GET', self::$testServerAddress . '/echo');
+        $response = (new Browser())->sendRequest($request);
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame('GET', json_decode((string)$response->getBody(), true)['method']);
+    }
+
+    public function testSendRequestDoesNotThrowOnErrorStatusCode(): void
+    {
+        $request = new \GuzzleHttp\Psr7\Request('GET', self::$testServerAddress . '/500');
+        $response = (new Browser())->sendRequest($request);
+
+        $this->assertSame(500, $response->getStatusCode());
+    }
+
+    public function testSendRequestThrowsNetworkExceptionOnConnectionFailure(): void
+    {
+        $request = new \GuzzleHttp\Psr7\Request('GET', 'http://127.0.0.1:1/');
+
+        try {
+            (new Browser([CURLOPT_CONNECTTIMEOUT => 2]))->sendRequest($request);
+            $this->fail('Expected NetworkException');
+        } catch (NetworkException $e) {
+            $this->assertSame($request, $e->getRequest());
+        }
+    }
+
+    public function testSendRequestThrowsRequestExceptionOnInvalidUrl(): void
+    {
+        $request = new \GuzzleHttp\Psr7\Request('GET', 'file:///etc/hosts');
+
+        try {
+            (new Browser())->sendRequest($request);
+            $this->fail('Expected RequestException');
+        } catch (RequestException $e) {
+            $this->assertSame($request, $e->getRequest());
+        }
+    }
+
+}

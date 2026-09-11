@@ -557,15 +557,19 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
     public function testGetRequestWithResponseBufferExceededDuringStreamingRejects()
     {
-        $this->markTestSkipped('We reject with Response body size of X bytes exceeds maximum of 4 bytes due to cURL handling');
         $promise = $this->browser->withResponseBuffer(4)->get($this->base . 'stream/1');
 
-        $this->setExpectedException(
-            'OverflowException',
-            'Response body size exceeds maximum of 4 bytes',
-            defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 0
-        );
-        \React\Async\await($promise);
+        try {
+            \React\Async\await($promise);
+            $this->fail('Expected OverflowException');
+        } catch (\OverflowException $e) {
+            // cURL may deliver more than the limit in one chunk, so the byte count is variable
+            $this->assertMatchesRegularExpression(
+                '/^Response body size of \d+ bytes exceeds maximum of 4 bytes$/',
+                $e->getMessage()
+            );
+            $this->assertSame(defined('SOCKET_EMSGSIZE') ? SOCKET_EMSGSIZE : 90, $e->getCode());
+        }
     }
 
     /**
@@ -684,7 +688,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
     public function testRequestStreamReturnsResponseWithResponseBodyUndecodedWhenResponseHasDoubleTransferEncoding()
     {
-        $this->markTestSkipped('BROKEN');
+        $this->markTestSkipped('BROKEN: libcurl decodes chunked transfer itself; the unframed body fails with CURLE_RECV_ERROR (56) and a framed body is decoded, so upstream react/http pass-through semantics do not apply');
         $socket = new SocketServer('127.0.0.1:0');
         $socket->on('connection', function (\React\Socket\ConnectionInterface $connection) {
             $connection->on('data', function () use ($connection) {

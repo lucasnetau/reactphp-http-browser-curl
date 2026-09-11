@@ -4,11 +4,16 @@ namespace EdgeTelemetrics\React\Http;
 
 use CurlHandle;
 use CurlMultiHandle;
+use EdgeTelemetrics\React\Http\Io\NetworkException;
+use EdgeTelemetrics\React\Http\Io\RequestException;
 use EdgeTelemetrics\React\Http\Io\UploadBodyStream;
 use Fig\Http\Message\StatusCodeInterface;
 use GuzzleHttp\Psr7\Utils;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
+use React\Async;
 use React\EventLoop;
 use React\Http\Io\HttpBodyStream;
 use React\Http\Message\ResponseException;
@@ -63,7 +68,7 @@ use function strtolower;
 use function strtoupper;
 use function trim;
 
-class Browser {
+class Browser implements ClientInterface {
     /** Largest response body prefix kept in memory before spilling to a temporary file */
     private const MAX_BUFFERED_MEMORY = 16777216; //16 MiB
 
@@ -188,6 +193,34 @@ class Browser {
     }
 
     /**
+     * PSR-18 synchronous request.
+     *
+     * Blocks until the response is received by driving the event loop. 4xx/5xx
+     * status codes resolve with the response; transport failures throw a
+     * NetworkException and invalid requests throw a RequestException.
+     */
+    public function sendRequest(RequestInterface $request): ResponseInterface
+    {
+        $browser = $this->withRejectErrorResponse(false);
+
+        try {
+            /** @var PromiseInterface<ResponseInterface> $promise */
+            $promise = $browser->request(
+                $request->getMethod(),
+                (string)$request->getUri(),
+                $request->getHeaders(),
+                (string)$request->getBody()
+            );
+
+            return Async\await($promise);
+        } catch (\InvalidArgumentException $e) {
+            throw new RequestException($e->getMessage(), $request, $e);
+        } catch (Throwable $e) {
+            throw new NetworkException($e->getMessage(), $request, $e);
+        }
+    }
+
+    /**
      * Set the maximum time in seconds for the whole request/response.
      *
      * A positive number sets an explicit timeout. `true` re-enables the default
@@ -278,6 +311,10 @@ class Browser {
 
     public function withResponseBuffer($maximumSize)
     {
+        if (!is_int($maximumSize) || $maximumSize < 1) {
+            throw new \InvalidArgumentException('Response buffer size must be a positive integer');
+        }
+
         return $this->withOptions(array(
             'maximumSize' => $maximumSize
         ));
@@ -312,6 +349,16 @@ class Browser {
 
         $method = strtoupper($method);
 
+        //CONNECT creates a tunnel instead of exchanging a request/response body, which this client doesn't model
+        if ($method === 'CONNECT') {
+            return Promise\reject(new \InvalidArgumentException('Unsupported HTTP method CONNECT'));
+        }
+
+        //the method is interpolated into the request line by libcurl: restrict it to RFC 7230 tokens
+        if (preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/', $method) !== 1) {
+            return Promise\reject(new \InvalidArgumentException('Invalid HTTP method given'));
+        }
+
         $headers = array_change_key_case($headers, CASE_LOWER);
 
         //If we have been passed an array of headers in "Content-Type: application/json" convert to our Header => Value format
@@ -332,31 +379,38 @@ class Browser {
 
         $curl = $this->initCurl();
 
-        $upload = null;
-        if ($body instanceof ReadableStreamInterface ) {
-            $upload = new UploadBodyStream($body);
-            $upload->on('continue', static function () use ($curl) {
-                curl_pause($curl, CURLPAUSE_CONT);
-            });
+        //HEAD and TRACE must not include content (RFC 9110); POST/PUT/PATCH send Content-Length: 0 when empty
+        $bodyAllowed = !in_array($method, ['HEAD', 'TRACE'], true);
+        $hasBody = $body instanceof ReadableStreamInterface || $body !== '';
+        $expectsBody = in_array($method, ['POST', 'PUT', 'PATCH'], true);
 
-            curl_setopt($curl, CURLOPT_PUT, true);
-            curl_setopt($curl, CURLOPT_READFUNCTION, static function ($curl, $fd, $length) use ($upload) {
-                return $upload->read($length);
-            });
-            if (array_key_exists('content-length', $headers)) {
-                curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
-                $headers['transfer-encoding'] = '';
+        $upload = null;
+        if ($bodyAllowed && ($hasBody || $expectsBody)) {
+            if ($body instanceof ReadableStreamInterface) {
+                $upload = new UploadBodyStream($body);
+                $upload->on('continue', static function () use ($curl) {
+                    curl_pause($curl, CURLPAUSE_CONT);
+                });
+
+                curl_setopt($curl, CURLOPT_PUT, true);
+                curl_setopt($curl, CURLOPT_READFUNCTION, static function ($curl, $fd, $length) use ($upload) {
+                    return $upload->read($length);
+                });
+                if (array_key_exists('content-length', $headers)) {
+                    curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
+                    $headers['transfer-encoding'] = '';
+                }
+            } else {
+                curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
             }
-        } elseif (!in_array($method, ['HEAD','OPTIONS'], true)) {
-            curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
         }
 
         $curl_opts = match($method) {
             'HEAD' => [ CURLOPT_NOBODY => true, ],
-            'GET' => [ CURLOPT_HTTPGET => true, ],
-            'POST','PUT','DELETE','PATCH' => [ CURLOPT_CUSTOMREQUEST => $method, ],
-            'OPTIONS' => [ CURLOPT_NOBODY => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS', ],
-            default => throw new \RuntimeException("Unsupported HTTP METHOD $method")
+            //GET with a body needs CUSTOMREQUEST, as CURLOPT_HTTPGET would drop the body
+            'GET' => $hasBody ? [ CURLOPT_CUSTOMREQUEST => 'GET' ] : [ CURLOPT_HTTPGET => true, ],
+            //everything else (POST/PUT/DELETE/PATCH/OPTIONS/TRACE/QUERY/WebDAV/custom) is sent verbatim
+            default => [ CURLOPT_CUSTOMREQUEST => $method ],
         };
 
         $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
