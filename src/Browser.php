@@ -72,6 +72,15 @@ class Browser implements ClientInterface {
     /** Largest response body prefix kept in memory before spilling to a temporary file */
     private const MAX_BUFFERED_MEMORY = 16777216; //16 MiB
 
+    /**
+     * libcurl ABI values for protocol-version constants missing from older PHP/libcurl
+     * builds (CURL_HTTP_VERSION_3/_3ONLY are only defined with PHP 8.3+).
+     */
+    private const HTTP2_TLS = 4;
+    private const HTTP2_PRIOR_KNOWLEDGE = 5;
+    private const HTTP3 = 30;
+    private const HTTP3_ONLY = 31;
+
     protected bool $disableCurlCache = false;
 
     /** @var array Options to disable as much of cURL cache as possible */
@@ -301,7 +310,9 @@ class Browser implements ClientInterface {
         $version = match($protocolVersion) {
             '1.0' => CURL_HTTP_VERSION_1_0,
             '1.1' => CURL_HTTP_VERSION_1_1,
-            '2' => CURL_HTTP_VERSION_2,
+            '2', '2.0' => CURL_HTTP_VERSION_2,
+            '3', '3.0' => self::httpVersionConstant('CURL_HTTP_VERSION_3', self::HTTP3),
+            //unknown values let cURL negotiate the protocol itself
             default => CURL_HTTP_VERSION_NONE
         };
         return $this->withOptions(array(
@@ -785,10 +796,10 @@ class Browser implements ClientInterface {
      * are fixed by libcurl's ABI, so fall back to them on older builds instead of throwing.
      */
     private static function httpVersionName(int $curlHttpVersion) : string {
-        $http2Tls = \defined('CURL_HTTP_VERSION_2TLS') ? CURL_HTTP_VERSION_2TLS : 4;
-        $http2PriorKnowledge = \defined('CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE') ? CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE : 5;
-        $http3 = \defined('CURL_HTTP_VERSION_3') ? CURL_HTTP_VERSION_3 : 30;
-        $http3Only = \defined('CURL_HTTP_VERSION_3ONLY') ? CURL_HTTP_VERSION_3ONLY : 31;
+        $http2Tls = self::httpVersionConstant('CURL_HTTP_VERSION_2TLS', self::HTTP2_TLS);
+        $http2PriorKnowledge = self::httpVersionConstant('CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE', self::HTTP2_PRIOR_KNOWLEDGE);
+        $http3 = self::httpVersionConstant('CURL_HTTP_VERSION_3', self::HTTP3);
+        $http3Only = self::httpVersionConstant('CURL_HTTP_VERSION_3ONLY', self::HTTP3_ONLY);
 
         return match ($curlHttpVersion) {
             CURL_HTTP_VERSION_NONE, CURL_HTTP_VERSION_1_0 => '1.0',
@@ -797,6 +808,14 @@ class Browser implements ClientInterface {
             $http3, $http3Only => '3',
             default => '1.1',
         };
+    }
+
+    /**
+     * Return an ext-curl constant if this PHP build defines it, otherwise libcurl's
+     * fixed ABI value, so HTTP/2TLS and HTTP/3 work on PHP 8.2 builds too if linked libcurl supports.
+     */
+    private static function httpVersionConstant(string $constant, int $fallback): int {
+        return \defined($constant) ? (int)\constant($constant) : $fallback;
     }
 
     /**

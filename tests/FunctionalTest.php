@@ -332,6 +332,13 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         $this->assertSame(['method' => 'GET', 'body' => 'get-body'], json_decode((string)$response->getBody(), true));
     }
 
+    public function testHttp3ProtocolVersionNegotiatesFallbackForPlainHttp(): void
+    {
+        $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->withProtocolVersion('3')->get(self::$testServerAddress . '/helloworld'));
+
+        $this->assertSame("Hello World!\n", (string)$response->getBody());
+    }
+
     public function testOptionsRequestReturnsResponseBody(): void
     {
         $response = \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->options(self::$testServerAddress . '/echo'));
