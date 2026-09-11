@@ -682,6 +682,27 @@ class Browser {
     }
 
     /**
+     * Map a CURLINFO_HTTP_VERSION result to a PSR-7 protocol version string.
+     *
+     * The CURL_HTTP_VERSION_3* constants are PHP 8.3+/libcurl 7.66+, but the numeric values
+     * are fixed by libcurl's ABI, so fall back to them on older builds instead of throwing.
+     */
+    private static function httpVersionName(int $curlHttpVersion) : string {
+        $http2Tls = \defined('CURL_HTTP_VERSION_2TLS') ? CURL_HTTP_VERSION_2TLS : 4;
+        $http2PriorKnowledge = \defined('CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE') ? CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE : 5;
+        $http3 = \defined('CURL_HTTP_VERSION_3') ? CURL_HTTP_VERSION_3 : 30;
+        $http3Only = \defined('CURL_HTTP_VERSION_3ONLY') ? CURL_HTTP_VERSION_3ONLY : 31;
+
+        return match ($curlHttpVersion) {
+            CURL_HTTP_VERSION_NONE, CURL_HTTP_VERSION_1_0 => '1.0',
+            CURL_HTTP_VERSION_1_1 => '1.1',
+            CURL_HTTP_VERSION_2, $http2Tls, $http2PriorKnowledge => '2',
+            $http3, $http3Only => '3',
+            default => '1.1',
+        };
+    }
+
+    /**
      * @param CurlHandle $curl
      * @param string $rawHeaders
      * @param ThroughStream|StreamInterface $body
@@ -748,12 +769,8 @@ class Browser {
             $body = new HttpBodyStream($body, $length);
         }
 
-        $httpVersion = match(curl_getinfo($curl, CURLINFO_HTTP_VERSION)) {
-            //@TODO check if we need to parse all the CURL_HTTP_VERSION_* values
-            CURL_HTTP_VERSION_1_1 => '1.1',
-            CURL_HTTP_VERSION_2 => '2',
-            CURL_HTTP_VERSION_NONE, CURL_HTTP_VERSION_1_0 => '1.0',
-        };
+        $curlHttpVersion = curl_getinfo($curl, CURLINFO_HTTP_VERSION);
+        $httpVersion = self::httpVersionName((int)$curlHttpVersion);
 
         $response = new \React\Http\Message\Response(
             $code,
