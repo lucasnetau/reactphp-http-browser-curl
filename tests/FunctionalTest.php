@@ -137,6 +137,51 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         );
     }
 
+    public function testStreamingDownloadAppliesCurlBackpressure()
+    {
+        $browser = new Browser([CURLOPT_TIMEOUT => 180]);
+
+        $received = 0;
+        $receivedWhilePaused = 0;
+        $paused = false;
+        $done = new \React\Promise\Deferred();
+
+        $browser->requestStreaming('GET', self::$testServerAddress . '/file/50mb')->then(
+            function (ResponseInterface $response) use (&$received, &$receivedWhilePaused, &$paused, $done) {
+                $body = $response->getBody();
+                $body->pause();
+                $paused = true;
+                $body->on('data', function ($data) use (&$received, &$receivedWhilePaused, &$paused) {
+                    $received += strlen($data);
+                    if ($paused) {
+                        $receivedWhilePaused += strlen($data);
+                    }
+                });
+                $body->on('end', function () use ($done) {
+                    $done->resolve(null);
+                });
+                $body->on('error', function ($e) use ($done) {
+                    $done->reject($e);
+                });
+                Loop::addTimer(0.05, function () use (&$paused, $body) {
+                    $paused = false;
+                    $body->resume();
+                });
+            },
+            function ($e) use ($done) {
+                $done->reject($e);
+            }
+        );
+
+        \React\Async\await($done->promise());
+
+        $this->assertSame(50 * 1024 * 1024, $received, 'Did not receive the full response body');
+        $this->assertLessThan(1024 * 1024, $receivedWhilePaused, 'cURL kept delivering while the body was paused');
+
+        \React\Async\await(\React\Promise\Timer\sleep(0));
+        $this->assertTrue($browser->isIdle());
+    }
+
     public function testLocal()
     {
         $browser = new Browser([CURLOPT_TIMEOUT => 180]);

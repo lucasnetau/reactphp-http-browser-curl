@@ -24,6 +24,7 @@ use ValueError;
 use function array_change_key_case;
 use function array_key_exists;
 use function count;
+use function curl_error;
 use function curl_getinfo;
 use function curl_init;
 use function curl_multi_add_handle;
@@ -48,6 +49,7 @@ use function ini_get;
 use function is_array;
 use function is_int;
 use function is_resource;
+use function min;
 use function preg_match;
 use function preg_split;
 use function property_exists;
@@ -62,6 +64,9 @@ use function strtoupper;
 use function trim;
 
 class Browser {
+    /** Largest response body prefix kept in memory before spilling to a temporary file */
+    private const MAX_BUFFERED_MEMORY = 16777216; //16 MiB
+
     protected bool $disableCurlCache = false;
 
     /** @var array Options to disable as much of cURL cache as possible */
@@ -445,9 +450,12 @@ class Browser {
         try {
             error_clear_last();
             $result = @curl_setopt_array($curl, $options);
-            if ($result === false || error_get_last()) {
-                //Capture malformed options that result in conversion errors like "Array to string conversion"
-                throw new \RuntimeException('One or more cURL options values were invalid');
+            $warning = error_get_last();
+            if ($result === false || $warning !== null) {
+                //Capture malformed options that result in conversion errors like "Array to string conversion",
+                //or options this libcurl build cannot set (e.g. CURLOPT_DNS_SERVERS without c-ares)
+                $detail = $warning['message'] ?? curl_error($curl);
+                throw new \RuntimeException('One or more cURL options values were invalid' . ($detail !== '' ? ': ' . $detail : ''));
             }
         } catch (ValueError $e) {
             throw new \RuntimeException('Invalid cURL options keys provided');
@@ -483,7 +491,8 @@ class Browser {
 
         if ($this->streaming) {
             $responseBody = new ThroughStream();
-            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
+            $pauseRequested = false;
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi, &$pauseRequested) {
                 static $first = true;
                 if ($first) {
                     try {
@@ -501,11 +510,28 @@ class Browser {
                     $first = false;
                 }
 
-                $responseBody->write($data);
+                if (!$responseBody->isWritable()) {
+                    return 0; //consumer closed the stream, abort the transfer
+                }
+                if ($pauseRequested) {
+                    //cURL re-delivers this chunk after curl_pause(CONT), so don't consume it yet
+                    return CURL_WRITEFUNC_PAUSE;
+                }
+                if ($responseBody->write($data) === false) {
+                    $pauseRequested = true; //consumer applied backpressure: halt before the next chunk
+                }
                 return strlen($data);
             });
+            $responseBody->on('drain', static function () use ($curl, &$pauseRequested) {
+                $pauseRequested = false;
+                curl_pause($curl, CURLPAUSE_CONT);
+            });
+            $responseBody->on('close', static function () use ($curl) {
+                //if paused, let the write callback run once more to observe the closed stream and abort
+                curl_pause($curl, CURLPAUSE_CONT);
+            });
         } else {
-            $responseBody = fopen('php://temp', 'w+');
+            $responseBody = fopen('php://temp/maxmemory:' . min($this->maximumSize, self::MAX_BUFFERED_MEMORY), 'w+');
             if ($responseBody === false) {
                 throw new \RuntimeException('Unable to create temporary file for response body');
             }
@@ -524,8 +550,8 @@ class Browser {
                     return 0;
                 }
 
-                fwrite($responseBody, $data);
-                return $len;
+                $written = fwrite($responseBody, $data);
+                return $written === false ? 0 : $written;
             });
         }
 
@@ -610,7 +636,8 @@ class Browser {
             $this->state->tickTimer = null;
         }
 
-        $nextIterationTimeout = 0.1; //100ms suggested by Curl
+        $nextIterationTimeout = 0.001; //poll at most every 1ms while a transfer is in flight
+        $drainBudget = 256; //yield to the event loop after at most 4 MiB so timers/other requests stay responsive
         try {
             foreach($this->state->inProgress as $mh) {
                 $transaction = $this->state->inProgress[$mh];
@@ -619,13 +646,18 @@ class Browser {
                     continue;
                 }
                 curl_multi_exec($mh, $still_running);
+
+                //Drain all immediately available data before returning to the event loop:
+                //each write callback gets at most 16 KiB, and a full loop iteration costs
+                //far more than the read it delivers.
+                while ($still_running && $drainBudget-- > 0 && curl_multi_select($mh, 0) > 0) {
+                    $nextIterationTimeout = 0;
+                    curl_multi_exec($mh, $still_running);
+                }
+
                 if ($still_running) {
-                    if ($nextIterationTimeout !== 0) {
-                        if (curl_multi_select($mh, 0) > 0) {
-                            $nextIterationTimeout = 0;
-                        } elseif ($this->state->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
-                            $nextIterationTimeout = 0.0001;
-                        }
+                    if ($nextIterationTimeout !== 0 && $this->state->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
+                        $nextIterationTimeout = 0.0001;
                     }
                     continue;
                 }
