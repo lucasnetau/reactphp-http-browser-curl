@@ -308,6 +308,7 @@ class Browser {
             }
         }
 
+        $upload = null;
         if ($body instanceof ReadableStreamInterface ) {
             $upload = new UploadBodyStream($body);
             $upload->on('continue', static function () use ($curl) {
@@ -336,8 +337,7 @@ class Browser {
 
         $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
 
-        if ($this->timeout !== null && $this->timeout > 0)
-        {
+        if ($this->timeout !== null && $this->timeout > 0) {
             $curl_opts[CURLOPT_TIMEOUT_MS] = (int) round($this->timeout * 1000);
         }
 
@@ -365,7 +365,7 @@ class Browser {
         }
         curl_setopt_array($curl, $curl_opts);
 
-        return $this->execRequest($curl);
+        return $this->execRequest($curl, $upload);
     }
 
     /**
@@ -430,7 +430,7 @@ class Browser {
         return $multi;
     }
 
-    protected function execRequest($curl) : PromiseInterface {
+    protected function execRequest($curl, ?UploadBodyStream $upload = null) : PromiseInterface {
         $headerHandle = fopen('php://memory', 'w+');
         if ($headerHandle === false) {
             throw new \RuntimeException('Unable to create temporary file for response headers');
@@ -523,6 +523,10 @@ class Browser {
             if (isset($transaction)) {
                 $transaction->close();
             }
+        });
+
+        $upload?->on('error', static function (Throwable $error) use ($deferred) {
+            $deferred->reject($error);
         });
 
         $this->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);

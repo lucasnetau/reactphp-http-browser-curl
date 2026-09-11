@@ -25,6 +25,9 @@ class UploadBodyStream extends EventEmitter {
      */
     private const MAX_BUFFERED_BYTES = 1048576; //1 MiB
 
+    /** libcurl's CURL_READFUNC_ABORT return code (PHP does not expose it as a constant) */
+    private const READFUNC_ABORT = 0x10000000;
+
     private ReadableStreamInterface $input;
 
     private string $buffer = '';
@@ -32,6 +35,8 @@ class UploadBodyStream extends EventEmitter {
     private bool $ended = false;
 
     private bool $paused = false;
+
+    private ?\Throwable $error = null;
 
     public function __construct(ReadableStreamInterface $input) {
         $this->input = $input;
@@ -54,6 +59,15 @@ class UploadBodyStream extends EventEmitter {
             $this->emit('continue');
         });
 
+        $input->on('error', function (\Throwable $error) {
+            $this->error = $error;
+            $this->ended = true;
+            //Browser rejects the request with the source error...
+            $this->emit('error', [$error]);
+            //...and lets cURL call the read callback, which aborts the transfer
+            $this->emit('continue');
+        });
+
         //a stream that is already closed will not emit 'close' again
         if (!$input->isReadable()) {
             $this->ended = true;
@@ -68,6 +82,10 @@ class UploadBodyStream extends EventEmitter {
      */
     public function read(int $length): string|int
     {
+        if ($this->error !== null) {
+            return self::READFUNC_ABORT;
+        }
+
         if ($this->buffer === '') {
             if ($this->ended) {
                 return ''; //EOF

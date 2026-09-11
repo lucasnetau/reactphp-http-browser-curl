@@ -789,6 +789,31 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->assertEquals('', $data['data']);
     }
 
+    public function testPostStreamErrorRejectsRequestWithSourceError()
+    {
+        $stream = new ThroughStream();
+        $stream->write('partial body');
+
+        Loop::addTimer(0.001, static function () use ($stream) {
+            $stream->emit('error', [new \RuntimeException('upload source failed')]);
+        });
+
+        $this->setExpectedException('RuntimeException', 'upload source failed');
+        \React\Async\await($this->browser->post($this->base . 'post', ['Content-Length' => 100], $stream));
+    }
+
+    public function testChunkedPostStreamErrorRejectsRequestWithSourceError()
+    {
+        $stream = new ThroughStream();
+
+        Loop::addTimer(0.001, static function () use ($stream) {
+            $stream->emit('error', [new \RuntimeException('upload source failed')]);
+        });
+
+        $this->setExpectedException('RuntimeException', 'upload source failed');
+        \React\Async\await($this->browser->post($this->base . 'post', ['Connection' => 'close'], $stream));
+    }
+
     /**
      * Feeds a ThroughStream in chunks, respecting the pause/resume backpressure signalled
      * by UploadBodyStream when its buffer is full.
