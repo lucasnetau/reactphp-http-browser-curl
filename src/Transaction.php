@@ -4,6 +4,7 @@ namespace EdgeTelemetrics\React\Http;
 
 use CurlHandle;
 use React\Promise\Deferred;
+use React\Stream\ThroughStream;
 use function curl_multi_close;
 use function curl_multi_remove_handle;
 use function curl_pause;
@@ -30,7 +31,7 @@ final class Transaction {
      * @param \CurlMultiHandle $multi
      * @param CurlHandle $curl
      * @param Deferred $deferred
-     * @param resource $file
+     * @param resource|ThroughStream $file
      * @param resource $headers
      */
     public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers) {

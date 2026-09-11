@@ -90,12 +90,9 @@ class Browser {
     ];
 
     /**
-     * @var \SplObjectStorage<CurlMultiHandle>
+     * Request state shared with all clones derived via with*()/requestStreaming()
      */
-    private \SplObjectStorage $inProgress;
-
-    /** Pending curlTick wake-up timer, cancelled once no requests are in progress */
-    private ?EventLoop\TimerInterface $tickTimer = null;
+    private BrowserState $state;
 
     private bool $streaming = false;
 
@@ -123,8 +120,8 @@ class Browser {
             $this->loop = EventLoop\Loop::get();
         }
 
-        $this->inProgress = new \SplObjectStorage();
-        
+        $this->state = new BrowserState();
+
         $share = curl_share_init();
         curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
         curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
@@ -134,7 +131,7 @@ class Browser {
     }
 
     public function isIdle() : bool {
-        return count($this->inProgress) === 0;
+        return count($this->state->inProgress) === 0;
     }
 
     public function head(string $url, array $headers = []) : PromiseInterface {
@@ -167,8 +164,6 @@ class Browser {
 
     protected function withOptions(array $options = []) : self {
         $browser = clone $this;
-        $browser->inProgress = new \SplObjectStorage();
-        $browser->tickTimer = null;
         foreach ($options as $name => $value) {
             if (property_exists($this, $name)) {
                 // restore default value if null is given
@@ -492,7 +487,7 @@ class Browser {
                 static $first = true;
                 if ($first) {
                     try {
-                        $transaction = $this->inProgress[$multi];
+                        $transaction = $this->state->inProgress[$multi];
                         $res = $this->resolveResponse($multi, $curl);
                         $transaction->deferred->resolve($res);
                     } catch (Throwable $ex) {
@@ -520,8 +515,8 @@ class Browser {
                 $xfer += $len;
 
                 if ($xfer > $this->maximumSize) {
-                    $transaction = $this->inProgress[$multi];
-                    unset($this->inProgress[$multi]);
+                    $transaction = $this->state->inProgress[$multi];
+                    unset($this->state->inProgress[$multi]);
                     $transaction->deferred->reject(new \OverflowException(
                         'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
                         \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
@@ -537,12 +532,12 @@ class Browser {
         /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
         curl_setopt($curl, CURLOPT_NOPROGRESS, 0);
         curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) use ($multi) {
-            if (!$this->inProgress->offsetExists($multi)) {
+            if (!$this->state->inProgress->offsetExists($multi)) {
                 return 0;
             }
 
             $status = Transaction::STATUS_CONNECTING;
-            $oldStatus = $this->inProgress[$multi]->status;
+            $oldStatus = $this->state->inProgress[$multi]->status;
             if ($dl_xfer > 0 || $dl_total > 0) {
                 if ($dl_xfer >= $dl_total) {
                     $status = Transaction::STATUS_DONE;
@@ -553,7 +548,7 @@ class Browser {
                 $status = Transaction::STATUS_UPLOADING;
             }
             if ($status !== $oldStatus) {
-                $this->inProgress[$multi]->status = $status;
+                $this->state->inProgress[$multi]->status = $status;
                 if ($oldStatus === Transaction::STATUS_UPLOADING) {
                     curl_pause($curl, CURLPAUSE_CONT); //Ensure we are not paused
                 }
@@ -562,9 +557,9 @@ class Browser {
         });
 
         $deferred = new Deferred(function() use ($multi, &$deferred) {
-            if ($this->inProgress->offsetExists($multi)) {
-                $transaction = $this->inProgress[$multi];
-                unset($this->inProgress[$multi]);
+            if ($this->state->inProgress->offsetExists($multi)) {
+                $transaction = $this->state->inProgress[$multi];
+                unset($this->state->inProgress[$multi]);
             }
             $deferred->reject(new \RuntimeException('Request cancelled'));
             if (isset($transaction)) {
@@ -576,85 +571,101 @@ class Browser {
             $deferred->reject($error);
         });
 
-        $this->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);
+        $this->state->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);
 
         curl_multi_exec($multi, $_); //GEt it started
 
-        //Kickstart the handler any time we initiate a new request and no requests are currently in the queue
-        if (count($this->inProgress) === 1) {
-            $this->loop->futureTick($this->curlTick(...));
-        }
+        //Kickstart the tick handler; it keeps running until all shared requests are done
+        $this->scheduleTick(0.0);
 
         return $deferred->promise();
     }
 
+    /**
+     * Queue the next curlTick unless one is already queued or running.
+     *
+     * A tick can be suspended via React\Async midway through (e.g. when a response promise
+     * resumes user code), so the scheduled flag stays set until the tick's tail reschedules.
+     */
+    private function scheduleTick(float $nextIterationTimeout): void
+    {
+        if ($this->state->tickScheduled) {
+            return;
+        }
+
+        $this->state->tickScheduled = true;
+        if ($nextIterationTimeout > 0) {
+            //use a timer instead of futureTick so that we don't lock the CPU at 100%
+            $this->state->tickTimer = $this->loop->addTimer($nextIterationTimeout, $this->curlTick(...));
+        } else {
+            $this->loop->futureTick($this->curlTick(...));
+        }
+    }
+
     private function curlTick(): void
     {
-        if ($this->tickTimer !== null) {
-            //cancel a wake-up that was superseded by this tick; resolving a promise may suspend
-            //us via React\Async before we reach the scheduling code below
-            $this->loop?->cancelTimer($this->tickTimer);
-            $this->tickTimer = null;
+        if ($this->state->tickTimer !== null) {
+            //cancel a wake-up that was superseded by this tick
+            $this->loop?->cancelTimer($this->state->tickTimer);
+            $this->state->tickTimer = null;
         }
 
         $nextIterationTimeout = 0.1; //100ms suggested by Curl
-        foreach($this->inProgress as $mh) {
-            $transaction = $this->inProgress[$mh];
-            if ($transaction->isClosed()) {
-                unset($this->inProgress[$mh]);
-                continue;
-            }
-            curl_multi_exec($mh, $still_running);
-            if ($still_running) {
-                if ($nextIterationTimeout !== 0) {
-                    if (curl_multi_select($mh, 0) > 0) {
-                        $nextIterationTimeout = 0;
-                    } elseif ($this->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
-                        $nextIterationTimeout = 0.0001;
+        try {
+            foreach($this->state->inProgress as $mh) {
+                $transaction = $this->state->inProgress[$mh];
+                if ($transaction->isClosed()) {
+                    unset($this->state->inProgress[$mh]);
+                    continue;
+                }
+                curl_multi_exec($mh, $still_running);
+                if ($still_running) {
+                    if ($nextIterationTimeout !== 0) {
+                        if (curl_multi_select($mh, 0) > 0) {
+                            $nextIterationTimeout = 0;
+                        } elseif ($this->state->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
+                            $nextIterationTimeout = 0.0001;
+                        }
+                    }
+                    continue;
+                }
+
+                $deferred = $transaction->deferred;
+                $info = curl_multi_info_read($mh);
+                if ($info === false) {
+                    unset($this->state->inProgress[$mh]);
+                    $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
+                    $transaction->close();
+                    continue;
+                }
+                $curl = $transaction->curl;
+
+                if ($transaction->file instanceof ThroughStream) {
+                    $transaction->file->end();
+                }
+
+                if ($info['result'] === CURLE_OK) {
+                    try {
+                        $res = $this->resolveResponse($mh, $curl);
+                        unset($this->state->inProgress[$mh]);
+                        $deferred->resolve($res);
+                    } catch (Throwable $ex) {
+                        $deferred->reject($ex);
+                    }
+                } else {
+                    unset($this->state->inProgress[$mh]);
+                    if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
+                        $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
+                    } else {
+                        $deferred->reject(new \RuntimeException(curl_strerror($info['result']) ?? ('cURL error ' . $info['result']), $info['result']));
                     }
                 }
-                continue;
-            }
-
-            $deferred = $transaction->deferred;
-            $info = curl_multi_info_read($mh);
-            if ($info === false) {
-                unset($this->inProgress[$mh]);
-                $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
                 $transaction->close();
-                continue;
             }
-            $curl = $transaction->curl;
-
-            if ($transaction->file instanceof ThroughStream) {
-                $transaction->file->end();
-            }
-
-            if ($info['result'] === CURLE_OK) {
-                try {
-                    $res = $this->resolveResponse($mh, $curl);
-                    unset($this->inProgress[$mh]);
-                    $deferred->resolve($res);
-                } catch (Throwable $ex) {
-                    $deferred->reject($ex);
-                }
-            } else {
-                unset($this->inProgress[$mh]);
-                if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
-                    $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
-                } else {
-                    $deferred->reject(new \RuntimeException(curl_strerror($info['result']) ?? ('cURL error ' . $info['result']), $info['result']));
-                }
-            }
-            $transaction->close();
-        }
-
-        if (count($this->inProgress)) {
-            if ($nextIterationTimeout > 0) {
-                //use a timer instead of futureTick so that we don't lock the CPU at 100%
-                $this->tickTimer = $this->loop->addTimer($nextIterationTimeout, $this->curlTick(...));
-            } else {
-                $this->loop->futureTick($this->curlTick(...));
+        } finally {
+            $this->state->tickScheduled = false;
+            if (count($this->state->inProgress) > 0) {
+                $this->scheduleTick($nextIterationTimeout);
             }
         }
     }
@@ -666,7 +677,7 @@ class Browser {
      */
     private function resolveResponse(CurlMultiHandle $mh, CurlHandle $curl): ResponseInterface
     {
-        $responseBody = $this->inProgress[$mh]->file;
+        $responseBody = $this->state->inProgress[$mh]->file;
         if (is_resource($responseBody)) {
             stream_set_blocking($responseBody, false);
             rewind($responseBody);
@@ -674,7 +685,7 @@ class Browser {
         }
 
         /** @var resource $responseHeaderHandle */
-        $responseHeaderHandle = $this->inProgress[$mh]->headers;
+        $responseHeaderHandle = $this->state->inProgress[$mh]->headers;
         rewind($responseHeaderHandle);
         $headers = stream_get_contents($responseHeaderHandle);
         //@TODO implement ReactPHP Browser withRejectErrorResponse support
@@ -786,19 +797,24 @@ class Browser {
         return $response;
     }
 
+    /**
+     * Cancel all requests in flight on this Browser and any clone derived from it.
+     *
+     * There is deliberately no automatic cancellation when a Browser instance is released:
+     * clones share request state, so any clone being garbage collected must not kill the
+     * family's requests. Unobserved requests are cleaned up by Transaction's destructor.
+     */
     public function cancelAll() : void {
-        if ($this->tickTimer !== null) {
-            $this->loop?->cancelTimer($this->tickTimer);
-            $this->tickTimer = null;
+        if ($this->state->tickTimer !== null) {
+            $this->loop?->cancelTimer($this->state->tickTimer);
+            $this->state->tickTimer = null;
         }
-        foreach($this->inProgress as $mh) {
-            $transaction = $this->inProgress[$mh];
-            unset($this->inProgress[$mh]);
+        $this->state->tickScheduled = false;
+
+        foreach($this->state->inProgress as $mh) {
+            $transaction = $this->state->inProgress[$mh];
+            unset($this->state->inProgress[$mh]);
             $transaction->close();
         }
-    }
-
-    public function __destruct() {
-        $this->cancelAll();
     }
 }
