@@ -396,13 +396,16 @@ class Browser {
 
         try {
             error_clear_last();
-            @curl_setopt_array($curl, $options);
-            if (error_get_last()) {
+            $result = @curl_setopt_array($curl, $options);
+            if ($result === false || error_get_last()) {
                 //Capture malformed options that result in conversion errors like "Array to string conversion"
                 throw new \RuntimeException('One or more cURL options values were invalid');
             }
         } catch (ValueError $e) {
             throw new \RuntimeException('Invalid cURL options keys provided');
+        } catch (\TypeError $e) {
+            //e.g. CURLOPT_RESOLVE/CURLOPT_HTTPHEADER with a non-array value
+            throw new \RuntimeException('One or more cURL options values were invalid', 0, $e);
         }
 
         return $curl;
