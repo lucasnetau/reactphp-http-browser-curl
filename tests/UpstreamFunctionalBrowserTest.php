@@ -1039,4 +1039,34 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->assertStringContainsString("\r\ncontent-type: application/json\r\n", strtolower($rawRequest));
         $this->assertStringContainsString("\r\nconnection: close\r\n", strtolower($rawRequest));
     }
+
+    public function testCrlfInjectionInHeadersIsRejected()
+    {
+        $cases = [
+            ['X-Test' => "hello\r\nX-Injected: yes"],
+            ['X-Test' => "hello\nX-Injected: yes"],
+            ['X-Test' => "hello\0X-Injected: yes"],
+            ["X-Test\r\nX-Injected: yes" => 'value'],
+            ["X-Test: value\r\nX-Injected: yes"],
+        ];
+
+        foreach ($cases as $headers) {
+            try {
+                \React\Async\await($this->browser->get($this->base . 'get', $headers));
+                $this->fail('Expected header injection to be rejected for ' . json_encode($headers));
+            } catch (\InvalidArgumentException $e) {
+                $this->assertStringStartsWith('Invalid request header', $e->getMessage());
+            }
+        }
+
+        $browser = $this->browser->withHeader('X-Default', "value\r\nX-Injected: yes");
+        try {
+            \React\Async\await($browser->get($this->base . 'get'));
+            $this->fail('Expected header injection via withHeader() to be rejected');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringStartsWith('Invalid request header', $e->getMessage());
+        }
+
+        $this->assertTrue($this->browser->isIdle());
+    }
 }

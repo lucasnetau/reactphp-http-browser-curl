@@ -168,15 +168,21 @@ class FuzzTest extends \React\Tests\Http\TestCase
             ["X-Fuzz: value\r\nX-Injected: yes"],
         ];
 
+        $rejected = 0;
         foreach ($cases as $headers) {
             $received = $this->fetchHeaders($headers);
-            $this->assertNotNull($received, 'Request failed for ' . json_encode($headers));
+            if ($received === null) {
+                $rejected++;
+                continue; // rejected outright (S1 fix): injection cannot happen
+            }
             $this->assertStringNotContainsString(
                 'x-injected',
                 strtolower((string) json_encode($received)),
                 'CRLF header injection succeeded for ' . json_encode($headers)
             );
         }
+
+        $this->assertSame(count($cases), $rejected, 'CRLF header injection attempts must be rejected');
     }
 
     public function testFuzzRequestUrlsAlwaysSettleWithoutPhpErrors(): void

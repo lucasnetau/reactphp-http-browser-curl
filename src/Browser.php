@@ -47,6 +47,7 @@ use function in_array;
 use function is_array;
 use function is_int;
 use function is_resource;
+use function preg_match;
 use function preg_split;
 use function property_exists;
 use function rewind;
@@ -295,8 +296,6 @@ class Browser {
 
         $method = strtoupper($method);
 
-        $curl = $this->initCurl();
-
         $headers = array_change_key_case($headers, CASE_LOWER);
 
         //If we have been passed an array of headers in "Content-Type: application/json" convert to our Header => Value format
@@ -307,6 +306,15 @@ class Browser {
                 unset($headers[$key]);
             }
         }
+
+        try {
+            //CR/LF and other control characters in a name/value would be injected as extra wire headers
+            $this->assertValidHeaders($headers + array_change_key_case($this->defaultHeaders));
+        } catch (\InvalidArgumentException $e) {
+            return Promise\reject($e);
+        }
+
+        $curl = $this->initCurl();
 
         $upload = null;
         if ($body instanceof ReadableStreamInterface ) {
@@ -366,6 +374,24 @@ class Browser {
         curl_setopt_array($curl, $curl_opts);
 
         return $this->execRequest($curl, $upload);
+    }
+
+    /**
+     * Reject names/values that would inject additional headers (or smuggle a request) into the wire format
+     *
+     * @param array<string|int, mixed> $headers
+     */
+    private function assertValidHeaders(array $headers) : void {
+        foreach($headers as $key => $value) {
+            if (preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/', (string)$key) !== 1) {
+                throw new \InvalidArgumentException('Invalid request header name given');
+            }
+            foreach (is_array($value) ? $value : [$value] as $item) {
+                if (preg_match('/[\x00-\x1F\x7F]/', (string)$item) === 1) {
+                    throw new \InvalidArgumentException('Invalid request header value given');
+                }
+            }
+        }
     }
 
     /**
