@@ -23,7 +23,7 @@ if (extension_loaded('xdebug')) {
     echo 'NOTICE: The "xdebug" extension is loaded, this has a major impact on performance.' . PHP_EOL;
 }
 
-$client = new Browser();
+$client = (new Browser([CURLOPT_DOH_URL => 'https://1.1.1.1/dns-query']))->withRejectErrorResponse(true);
 
 echo 'Requesting ' . $url . '…' . PHP_EOL;
 
@@ -46,7 +46,7 @@ $client->requestStreaming('GET', $url)->then(function (ResponseInterface $respon
     });
 
     // report progress every 0.1s
-    $timer = Loop::addPeriodicTimer(0.1, function () use (&$bytes) {
+    $timer = Loop::addPeriodicTimer(0.2, function () use (&$bytes) {
         echo "\rDownloaded " . $bytes . " bytes…";
     });
 
@@ -56,7 +56,7 @@ $client->requestStreaming('GET', $url)->then(function (ResponseInterface $respon
 
         $time = microtime(true) - $time;
 
-        echo "\r" . 'Downloaded ' . $bytes . ' bytes in ' . round($time, 3) . 's => ' . round($bytes / $time / 1000000, 1) . ' MB/s' . PHP_EOL;
+        echo "\r" . 'Downloaded ' . $bytes . ' bytes in ' . round($time, 3) . 's => ' . round($bytes / $time / 1_048_576, 1) . ' MiB/s' . PHP_EOL;
     });
 }, function (Exception $e) {
     echo 'Error: ' . $e->getMessage() . PHP_EOL;
