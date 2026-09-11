@@ -583,7 +583,7 @@ class Browser {
                 if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
                     $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
                 } else {
-                    $deferred->reject(new \RuntimeException(curl_strerror($info['result']), $info['result']));
+                    $deferred->reject(new \RuntimeException(curl_strerror($info['result']) ?? ('cURL error ' . $info['result']), $info['result']));
                 }
             }
             $transaction->close();
