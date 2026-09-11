@@ -38,6 +38,9 @@ $browser = new Browser([
 ### Security
 Only `http://` and `https://` request URLs are accepted; any other scheme is rejected with an `InvalidArgumentException`. As a defence in depth, `CURLOPT_PROTOCOLS` and `CURLOPT_REDIR_PROTOCOLS` default to `CURLPROTO_HTTP | CURLPROTO_HTTPS`, so redirects to schemes such as `file://` are blocked as well. Passing your own `CURLOPT_PROTOCOLS` / `CURLOPT_REDIR_PROTOCOLS` to the constructor overrides the cURL-level restriction (the request URL itself must still be HTTP(S)).
 
+### Timeouts
+Requests use PHP's `default_socket_timeout` (60 seconds by default) when no explicit timeout is set. Use `$browser->withTimeout(5)` for a custom value, `$browser->withTimeout(true)` to re-enable the default, or `$browser->withTimeout(false)` to disable timeouts entirely. A `CURLOPT_TIMEOUT` / `CURLOPT_TIMEOUT_MS` passed to the constructor takes precedence over the default.
+
 ### Connection Reuse
 Each instance of Browser shares a Connection pool, DNS cache, SSL cache, and Cookie Jar. An example of this can be seen in [/examples/connection_pooling.php](/examples/connection_pooling.php) script.
 

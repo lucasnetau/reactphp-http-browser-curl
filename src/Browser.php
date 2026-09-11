@@ -44,6 +44,7 @@ use function fopen;
 use function fwrite;
 use function implode;
 use function in_array;
+use function ini_get;
 use function is_array;
 use function is_int;
 use function is_resource;
@@ -186,6 +187,13 @@ class Browser {
         return $this->withOptions(['streaming' => true])->request($method, $url, $headers, $body);
     }
 
+    /**
+     * Set the maximum time in seconds for the whole request/response.
+     *
+     * A positive number sets an explicit timeout. `true` re-enables the default
+     * (PHP's `default_socket_timeout`, 60s by default). `false` or a negative
+     * value disables timeouts, allowing requests to stay pending forever.
+     */
     public function withTimeout(float|int|bool $timeout)
     {
         if ($timeout === true) {
@@ -345,14 +353,19 @@ class Browser {
 
         $curl_opts[CURLOPT_HTTP_VERSION] = $this->httpVersion;
 
-        if ($this->timeout !== null && $this->timeout > 0) {
-            $curl_opts[CURLOPT_TIMEOUT_MS] = (int) round($this->timeout * 1000);
-        }
-
         $curl_opts[CURLOPT_FOLLOWLOCATION] = $this->followRedirects;
         $curl_opts[CURLOPT_MAXREDIRS] = $this->maxRedirects;
 
         $curl_opts[CURLOPT_URL] = (string)$url;
+
+        /**
+         * Explicit timeout, otherwise PHP's default_socket_timeout like react/http.
+         *  withTimeout(false)/0/negative disables it; constructor CURLOPT_TIMEOUT(_MS) takes precedence.
+         **/
+        $timeout = $this->timeout ?? (float)ini_get('default_socket_timeout');
+        if ($timeout > 0 && !array_key_exists(CURLOPT_TIMEOUT, $this->options) && !array_key_exists(CURLOPT_TIMEOUT_MS, $this->options)) {
+            $curl_opts[CURLOPT_TIMEOUT_MS] = (int) round($timeout * 1000);
+        }
 
         $headers = $headers + array_change_key_case($this->defaultHeaders);
 

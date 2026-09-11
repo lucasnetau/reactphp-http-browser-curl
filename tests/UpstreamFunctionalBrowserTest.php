@@ -268,6 +268,16 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         \React\Async\await($this->browser->withBase('http://example.com/')->get($this->base . 'get'));
     }
 
+    public function testProtocolRelativeUrlReplacesBaseUrl()
+    {
+        $browser = $this->browser->withBase('http://example.com/');
+        $authority = substr($this->base, strlen('http://'));
+
+        $response = \React\Async\await($browser->get('//' . $authority . 'get'));
+
+        $this->assertEquals(200, $response->getStatusCode());
+    }
+
     public function testCancelGetRequestWillRejectRequest()
     {
         $promise = $this->browser->get($this->base . 'get');
@@ -386,6 +396,55 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     public function testTimeoutFalseShouldResolveSuccessfully()
     {
         \React\Async\await($this->browser->withTimeout(false)->get($this->base . 'get'));
+    }
+
+    public function testDefaultSocketTimeoutAppliesWhenNoTimeoutConfigured()
+    {
+        $previous = ini_get('default_socket_timeout');
+        ini_set('default_socket_timeout', '1');
+
+        try {
+            $start = microtime(true);
+            $promise = $this->browser->get($this->base . 'delay/10');
+
+            $this->setExpectedException('RuntimeException', 'Request timed out after ');
+            try {
+                \React\Async\await($promise);
+            } finally {
+                $this->assertLessThan(5, microtime(true) - $start);
+            }
+        } finally {
+            ini_set('default_socket_timeout', $previous);
+        }
+    }
+
+    public function testConstructorTimeoutTakesPrecedenceOverDefaultSocketTimeout()
+    {
+        $previous = ini_get('default_socket_timeout');
+        ini_set('default_socket_timeout', '1');
+
+        $socket = new SocketServer('127.0.0.1:0');
+        $socket->on('connection', function (ConnectionInterface $connection) {
+            $rawRequest = '';
+            $connection->on('data', function ($data) use ($connection, &$rawRequest) {
+                $rawRequest .= $data;
+                if (strpos($rawRequest, "\r\n\r\n") !== false) {
+                    Loop::addTimer(1.5, function () use ($connection) {
+                        $connection->end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    });
+                }
+            });
+        });
+
+        try {
+            $response = \React\Async\await(
+                (new Browser([CURLOPT_TIMEOUT => 5]))->get(str_replace('tcp:', 'http:', $socket->getAddress()) . '/')
+            );
+            $this->assertSame(200, $response->getStatusCode());
+        } finally {
+            $socket->close();
+            ini_set('default_socket_timeout', $previous);
+        }
     }
 
     /**
