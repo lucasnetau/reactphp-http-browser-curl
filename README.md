@@ -38,6 +38,8 @@ $browser = new Browser([
 ### Security
 Only `http://` and `https://` request URLs are accepted; any other scheme is rejected with an `InvalidArgumentException`. As a defence in depth, `CURLOPT_PROTOCOLS` and `CURLOPT_REDIR_PROTOCOLS` default to `CURLPROTO_HTTP | CURLPROTO_HTTPS`, so redirects to schemes such as `file://` are blocked as well. Passing your own `CURLOPT_PROTOCOLS` / `CURLOPT_REDIR_PROTOCOLS` to the constructor overrides the cURL-level restriction (the request URL itself must still be HTTP(S)).
 
+`withBase()` is a convenience for resolving relative URLs, not a host allow-list: absolute and protocol-relative URLs replace the base entirely (matching react/http). Allow-list hosts yourself if request URLs can come from untrusted input.
+
 ### Timeouts
 Requests use PHP's `default_socket_timeout` (60 seconds by default) when no explicit timeout is set. Use `$browser->withTimeout(5)` for a custom value, `$browser->withTimeout(true)` to re-enable the default, or `$browser->withTimeout(false)` to disable timeouts entirely. A `CURLOPT_TIMEOUT` / `CURLOPT_TIMEOUT_MS` passed to the constructor takes precedence over the default.
 

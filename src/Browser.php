@@ -238,6 +238,13 @@ class Browser {
         ));
     }
 
+    /**
+     * Resolve relative request URLs against this base URL.
+     *
+     * This is a convenience for building API clients, NOT a security boundary: an
+     * absolute or protocol-relative URL replaces the base entirely (same as react/http).
+     * Validate/allow-list hosts yourself if request URLs can come from untrusted input.
+     */
     public function withBase($baseUrl)
     {
         if ($baseUrl !== null) {
@@ -286,7 +293,8 @@ class Browser {
     public function request(string $method, string $url, array $headers = [], string|ReadableStreamInterface $body = ''): PromiseInterface
     {
         if ($this->baseUrl !== null) {
-            // ensure we're actually below the base URL
+            //base URL is a convenience for resolving relative URLs only, not a host allow-list:
+            //absolute (or protocol-relative) URLs replace it entirely, matching react/http
             $url = Uri::resolve(new Uri($this->baseUrl), new Uri($url));
         } else {
             $url = new Uri($url);
