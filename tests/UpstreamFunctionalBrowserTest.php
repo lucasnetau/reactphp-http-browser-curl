@@ -404,6 +404,38 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         \React\Async\await($this->browser->get($this->base . 'redirect-to?url=' . urlencode($this->base . 'get')));
     }
 
+    public function testNonHttpSchemesAreRejected()
+    {
+        foreach (['file://localhost/etc/hosts', 'gopher://127.0.0.1:1/_', 'dict://127.0.0.1:1/', 'ftp://127.0.0.1/', 'data:text/plain,hello'] as $url) {
+            try {
+                \React\Async\await($this->browser->get($url));
+                $this->fail('Expected ' . $url . ' to be rejected');
+            } catch (\InvalidArgumentException $e) {
+                $this->assertSame('Invalid request URL given', $e->getMessage());
+            }
+        }
+    }
+
+    public function testRedirectToNonHttpSchemeCannotReadLocalFiles()
+    {
+        $file = tempnam(sys_get_temp_dir(), 'scheme');
+        file_put_contents($file, 'SCHEME_SENTINEL');
+
+        try {
+            try {
+                $response = \React\Async\await($this->browser->get(
+                    $this->base . 'redirect-to?url=' . rawurlencode('file://localhost' . $file)
+                ));
+                $this->assertStringNotContainsString('SCHEME_SENTINEL', (string)$response->getBody());
+            } catch (\Throwable $e) {
+                //redirect blocked before the local file could be read
+                $this->assertStringNotContainsString('SCHEME_SENTINEL', $e->getMessage());
+            }
+        } finally {
+            unlink($file);
+        }
+    }
+
     /**
      * @doesNotPerformAssertions
      */

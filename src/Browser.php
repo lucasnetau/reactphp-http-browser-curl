@@ -74,6 +74,10 @@ class Browser {
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
+        //secure default: never speak non-HTTP protocols, including on redirects. Pass your own
+        //CURLOPT_PROTOCOLS / CURLOPT_REDIR_PROTOCOLS to opt out (request() still only allows HTTP(S))
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
         //CURLOPT_VERBOSE => true,
         //CURLINFO_HEADER_OUT => true,
         //CURLOPT_HSTS_ENABLE => true, //PHP8.2
@@ -277,13 +281,16 @@ class Browser {
             $url = Uri::resolve(new Uri($this->baseUrl), new Uri($url));
         } else {
             $url = new Uri($url);
-            if ($url->getHost() === '') {
-                return Promise\reject(
-                    new \InvalidArgumentException(
-                        'Invalid request URL given'
-                    )
-                );
-            }
+        }
+
+        //only HTTP(S) may be requested: cURL supports many other schemes (file, gopher, dict, ...)
+        //which an application passing through an untrusted URL could use for SSRF/local file reads
+        if ($url->getHost() === '' || !in_array(strtolower($url->getScheme()), ['http', 'https'], true)) {
+            return Promise\reject(
+                new \InvalidArgumentException(
+                    'Invalid request URL given'
+                )
+            );
         }
 
         $method = strtoupper($method);
