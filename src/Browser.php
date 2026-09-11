@@ -88,6 +88,9 @@ class Browser {
      */
     private \SplObjectStorage $inProgress;
 
+    /** Pending curlTick wake-up timer, cancelled once no requests are in progress */
+    private ?EventLoop\TimerInterface $tickTimer = null;
+
     private bool $streaming = false;
 
     private bool $followRedirects = true;
@@ -159,6 +162,7 @@ class Browser {
     protected function withOptions(array $options = []) : self {
         $browser = clone $this;
         $browser->inProgress = new \SplObjectStorage();
+        $browser->tickTimer = null;
         foreach ($options as $name => $value) {
             if (property_exists($this, $name)) {
                 // restore default value if null is given
@@ -526,6 +530,13 @@ class Browser {
 
     private function curlTick(): void
     {
+        if ($this->tickTimer !== null) {
+            //cancel a wake-up that was superseded by this tick; resolving a promise may suspend
+            //us via React\Async before we reach the scheduling code below
+            $this->loop?->cancelTimer($this->tickTimer);
+            $this->tickTimer = null;
+        }
+
         $nextIterationTimeout = 0.1; //100ms suggested by Curl
         foreach($this->inProgress as $mh) {
             $transaction = $this->inProgress[$mh];
@@ -580,8 +591,8 @@ class Browser {
 
         if (count($this->inProgress)) {
             if ($nextIterationTimeout > 0) {
-                $this->loop->addTimer($nextIterationTimeout,
-                    $this->curlTick(...)); //use a timer instead of futureTick so that we don't lock the CPU at 100%
+                //use a timer instead of futureTick so that we don't lock the CPU at 100%
+                $this->tickTimer = $this->loop->addTimer($nextIterationTimeout, $this->curlTick(...));
             } else {
                 $this->loop->futureTick($this->curlTick(...));
             }
@@ -699,6 +710,10 @@ class Browser {
     }
 
     public function cancelAll() : void {
+        if ($this->tickTimer !== null) {
+            $this->loop?->cancelTimer($this->tickTimer);
+            $this->tickTimer = null;
+        }
         foreach($this->inProgress as $mh) {
             $transaction = $this->inProgress[$mh];
             unset($this->inProgress[$mh]);
