@@ -11,6 +11,7 @@ use React\Http\Message\ResponseException;
 use React\Http\Middleware\StreamingRequestMiddleware;
 use React\Promise\Promise;
 use React\Promise\Stream;
+use React\Socket\ConnectionInterface;
 use React\Socket\SocketServer;
 use React\Stream\ReadableStreamInterface;
 use React\Stream\ThroughStream;
@@ -87,6 +88,14 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
                     404,
                     array(),
                     ''
+                );
+            }
+
+            if ($path === '/status/404/body') {
+                return new Response(
+                    404,
+                    array(),
+                    'not found'
                 );
             }
 
@@ -492,6 +501,18 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         }
     }
 
+    public function testStreamingErrorStatusCodeWithBodyRejectsWithResponseException()
+    {
+        try {
+            \React\Async\await($this->browser->requestStreaming('GET', $this->base . 'status/404/body'));
+            $this->fail();
+        } catch (ResponseException $e) {
+            $this->assertEquals(404, $e->getCode());
+            $this->assertInstanceOf('Psr\Http\Message\ResponseInterface', $e->getResponse());
+            $this->assertEquals(404, $e->getResponse()->getStatusCode());
+        }
+    }
+
     public function testErrorStatusCodeDoesNotRejectWithRejectErrorResponseFalse()
     {
         $response = \React\Async\await($this->browser->withRejectErrorResponse(false)->get($this->base . 'status/404'));
@@ -800,5 +821,50 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         );
 
         $this->assertEquals('hello', $buffer);
+    }
+
+    public function testRequestStreamingGetWithLowercaseContentLengthHeaderReportsBodySize()
+    {
+        $socket = new SocketServer('127.0.0.1:0');
+        $socket->on('connection', function (\React\Socket\ConnectionInterface $connection) {
+            $connection->on('data', function () use ($connection) {
+                $connection->end("HTTP/1.1 200 OK\r\ncontent-length: 5\r\nConnection: close\r\n\r\nhello");
+            });
+        });
+        $base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
+
+        try {
+            $response = \React\Async\await($this->browser->requestStreaming('GET', $base));
+        } finally {
+            $socket->close();
+        }
+
+        $this->assertEquals('5', $response->getHeaderLine('content-length'));
+        $this->assertEquals(5, $response->getBody()->getSize());
+    }
+
+    public function testRequestWithListFormatHeadersSendsTrimmedHeaders()
+    {
+        $rawRequest = '';
+        $socket = new SocketServer('127.0.0.1:0');
+        $socket->on('connection', function (ConnectionInterface $connection) use (&$rawRequest) {
+            $connection->on('data', function ($data) use ($connection, &$rawRequest) {
+                $rawRequest .= $data;
+                if (strpos($rawRequest, "\r\n\r\n") !== false) {
+                    $connection->end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                }
+            });
+        });
+        $base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
+
+        try {
+            $response = \React\Async\await($this->browser->get($base, ['Content-Type: application/json', 'Connection: close']));
+        } finally {
+            $socket->close();
+        }
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $this->assertStringContainsString("\r\ncontent-type: application/json\r\n", strtolower($rawRequest));
+        $this->assertStringContainsString("\r\nconnection: close\r\n", strtolower($rawRequest));
     }
 }
