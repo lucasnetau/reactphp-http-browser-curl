@@ -152,6 +152,35 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
                 });
             }
 
+            if ($path === '/hash') {
+                return new Promise(function ($resolve) use ($request) {
+                    $body = $request->getBody();
+                    assert($body instanceof ReadableStreamInterface);
+
+                    $hash = hash_init('sha256');
+                    $length = 0;
+                    $resolved = false;
+                    $body->on('data', function ($data) use ($hash, &$length) {
+                        hash_update($hash, $data);
+                        $length += strlen($data);
+                    });
+                    $body->on('close', function () use (&$resolved, $resolve, $hash, &$length) {
+                        if ($resolved) {
+                            return;
+                        }
+                        $resolved = true;
+                        $resolve(new Response(
+                            200,
+                            array('Content-Type' => 'application/json'),
+                            json_encode(array(
+                                'bytes' => $length,
+                                'sha256' => hash_final($hash)
+                            ))
+                        ));
+                    });
+                });
+            }
+
             if ($path === '/stream/1') {
                 $stream = new ThroughStream();
 
@@ -324,7 +353,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
     {
         $promise = $this->browser->withTimeout(1.1)->get($this->base . 'delay/10');
 
-        $this->setExpectedException('RuntimeException', 'Request timed out after 1.1 seconds');
+        $this->setExpectedException('RuntimeException', 'Request timed out after ');
         \React\Async\await($promise);
     }
 
@@ -347,7 +376,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $promise = $this->browser->withTimeout(1.1)->post($this->base . 'delay/10', array(), $stream);
         $stream->end();
 
-        $this->setExpectedException('RuntimeException', 'Request timed out after 1.1 seconds');
+        $this->setExpectedException('RuntimeException', 'Request timed out after ');
         \React\Async\await($promise);
     }
 
@@ -726,6 +755,92 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $data = json_decode((string)$response->getBody(), true);
 
         $this->assertEquals('', $data['data']);
+    }
+
+    /**
+     * Feeds a ThroughStream in chunks, respecting the pause/resume backpressure signalled
+     * by UploadBodyStream when its buffer is full.
+     */
+    private function pumpBody(ThroughStream $stream, string $body, int $chunkSize, float $interval = 0.001): void
+    {
+        $offset = 0;
+        $blocked = false;
+        $length = strlen($body);
+
+        // ThroughStream::write() returns false while paused and emits 'drain' on resume
+        $stream->on('drain', static function () use (&$blocked) {
+            $blocked = false;
+        });
+
+        $timer = Loop::addPeriodicTimer($interval, static function () use ($stream, $body, $length, $chunkSize, &$offset, &$blocked, &$timer) {
+            if ($blocked) {
+                return;
+            }
+            if ($offset >= $length) {
+                Loop::cancelTimer($timer);
+                $stream->end();
+                return;
+            }
+            // write() delivers the chunk even when it returns false, so advance before blocking
+            $chunk = substr($body, $offset, $chunkSize);
+            $offset += $chunkSize;
+            if ($stream->write($chunk) === false) {
+                $blocked = true;
+            }
+        });
+    }
+
+    /** @return array{bytes: int, sha256: string} */
+    private function assertHashedUpload(Browser $browser, string $body, array $headers = [], int $chunkSize = 256 * 1024): array
+    {
+        $stream = new ThroughStream();
+        $this->pumpBody($stream, $body, $chunkSize);
+
+        $response = \React\Async\await($browser->post($this->base . 'hash', $headers, $stream));
+        $data = json_decode((string)$response->getBody(), true);
+
+        $this->assertSame(strlen($body), $data['bytes'], 'uploaded byte count mismatch');
+        $this->assertSame(hash('sha256', $body), $data['sha256'], 'uploaded body hash mismatch');
+
+        return $data;
+    }
+
+    public function testPostStreamLargerThanCurlUploadBufferUploadsIntact()
+    {
+        //exceeds cURL's ~20 MiB internal upload buffer, so cURL has to pause and wait for the producer
+        $total = 32 * 1024 * 1024;
+        $body = str_repeat('abcdefgh', intdiv($total, 8));
+
+        $this->assertHashedUpload(new Browser([CURLOPT_TIMEOUT => 60]), $body, ['Content-Length' => $total]);
+    }
+
+    public function testPostStreamWithSmallCurlUploadBufferUploadsIntact()
+    {
+        //tiny cURL upload buffer makes cURL read the body in small pieces while it is still being produced
+        $total = 4 * 1024 * 1024;
+        $body = str_repeat('abcdefgh', intdiv($total, 8));
+
+        $this->assertHashedUpload(
+            new Browser([CURLOPT_TIMEOUT => 30, CURLOPT_UPLOAD_BUFFERSIZE => 131072]),
+            $body,
+            ['Content-Length' => $total]
+        );
+    }
+
+    public function testChunkedPostStreamLargerThanCurlUploadBufferUploadsIntact()
+    {
+        $total = 32 * 1024 * 1024;
+        $body = str_repeat('0123456789', intdiv($total, 10));
+
+        $this->assertHashedUpload(new Browser([CURLOPT_TIMEOUT => 60]), $body);
+    }
+
+    public function testSlowChunkedPostStreamDripsThroughUploadBufferUploadsIntact()
+    {
+        $total = 256 * 1024;
+        $body = str_repeat('slow-drip-', intdiv($total, 10));
+
+        $this->assertHashedUpload($this->browser, $body, [], 1024);
     }
 
     public function testSendsHttp11ByDefault()

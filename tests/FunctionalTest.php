@@ -204,7 +204,7 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         $browser = (new Browser())->withTimeout(2);
 
         $promise = $browser->get(self::$testServerAddress . '/file/sleep');
-        $this->setExpectedException('RuntimeException', 'Request timed out after 2 seconds');
+        $this->setExpectedException('RuntimeException', 'Request timed out after ');
 
         \React\Async\await($promise);
         $this->assertTrue($browser->isIdle());

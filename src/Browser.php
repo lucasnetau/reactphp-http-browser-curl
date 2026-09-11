@@ -303,15 +303,14 @@ class Browser {
 
         if ($body instanceof ReadableStreamInterface ) {
             $upload = new UploadBodyStream($body);
-            $upload->on('pause', static function () use ($curl) {
-                curl_pause($curl, CURLPAUSE_SEND);
-            });
             $upload->on('continue', static function () use ($curl) {
                 curl_pause($curl, CURLPAUSE_CONT);
             });
 
             curl_setopt($curl, CURLOPT_PUT, true);
-            curl_setopt($curl, CURLOPT_INFILE, $upload->getReadableStream());
+            curl_setopt($curl, CURLOPT_READFUNCTION, static function ($curl, $fd, $length) use ($upload) {
+                return $upload->read($length);
+            });
             if (array_key_exists('content-length', $headers)) {
                 curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
                 $headers['transfer-encoding'] = '';

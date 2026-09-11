@@ -44,7 +44,7 @@ final class Transaction {
             curl_multi_close($this->multi);
             curl_setopt($this->curl, CURLOPT_XFERINFOFUNCTION, null);
             curl_setopt($this->curl, CURLOPT_WRITEFUNCTION, null);
-            curl_setopt($this->curl, CURLOPT_INFILE, null);
+            curl_setopt($this->curl, CURLOPT_READFUNCTION, null);
             unset($this->multi);
             unset($this->curl);
             fclose($this->headers);
