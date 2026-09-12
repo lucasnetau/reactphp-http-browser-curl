@@ -51,6 +51,12 @@ Only `http://` and `https://` request URLs are accepted; any other scheme is rej
 
 `withBase()` is a convenience for resolving relative URLs, not a host allow-list: absolute and protocol-relative URLs replace the base entirely (matching react/http). Allow-list hosts yourself if request URLs can come from untrusted input.
 
+`$browser->withSsrfProtection()` rejects requests that connect to a non-public address (loopback, RFC 1918, link-local, CGNAT, multicast, unique-local IPv6, and IPv4-mapped IPv6 addresses). The check uses `CURLOPT_PREREQFUNCTION` and runs after the connection is established but before any request is sent, on every connection and every redirect hop, so DNS rebinding and obfuscated IP literals (`127.1`, decimal/hex forms) cannot bypass it. It is **disabled by default** and requires **PHP 8.4+**; enabling it on older PHP throws a `RuntimeException` rather than silently doing nothing. Note that the TCP/TLS handshake still happens before the check, and a configured proxy is not inspected (the proxy's address is checked instead).
+
+```php
+$browser = (new Browser())->withSsrfProtection();
+```
+
 ### Timeouts
 Requests use PHP's `default_socket_timeout` (60 seconds by default) when no explicit timeout is set. Use `$browser->withTimeout(5)` for a custom value, `$browser->withTimeout(true)` to re-enable the default, or `$browser->withTimeout(false)` to disable timeouts entirely. A `CURLOPT_TIMEOUT` / `CURLOPT_TIMEOUT_MS` passed to the constructor takes precedence over the default.
 

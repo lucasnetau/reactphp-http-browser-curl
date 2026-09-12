@@ -495,6 +495,39 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         }
     }
 
+    public function testSsrfProtectionBlocksRequestToLocalAddress()
+    {
+        if (!\defined('CURLOPT_PREREQFUNCTION')) {
+            $this->markTestSkipped('CURLOPT_PREREQFUNCTION requires PHP 8.4+');
+        }
+
+        try {
+            \React\Async\await($this->browser->withSsrfProtection()->get($this->base . 'get'));
+            $this->fail('Expected request to a local address to be rejected');
+        } catch (\RuntimeException $e) {
+            $this->assertSame(CURLE_ABORTED_BY_CALLBACK, $e->getCode());
+            $this->assertStringContainsString('blocked address', $e->getMessage());
+            $this->assertStringContainsString('127.0.0.1', $e->getMessage());
+        }
+    }
+
+    public function testSsrfProtectionDisabledByDefault()
+    {
+        $response = \React\Async\await($this->browser->get($this->base . 'get'));
+        $this->assertSame(200, $response->getStatusCode());
+    }
+
+    public function testSsrfProtectionCannotBeEnabledWithoutPhp84Support()
+    {
+        if (\defined('CURLOPT_PREREQFUNCTION')) {
+            $this->markTestSkipped('CURLOPT_PREREQFUNCTION is available');
+        }
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('SSRF protection requires PHP 8.4+');
+        $this->browser->withSsrfProtection();
+    }
+
     /**
      * @doesNotPerformAssertions
      */

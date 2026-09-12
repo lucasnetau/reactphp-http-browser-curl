@@ -45,7 +45,9 @@ use function curl_setopt_array;
 use function curl_share_init;
 use function curl_share_setopt;
 use function curl_strerror;
+use function defined;
 use function explode;
+use function filter_var;
 use function fopen;
 use function fwrite;
 use function implode;
@@ -55,6 +57,7 @@ use function is_array;
 use function is_int;
 use function is_resource;
 use function min;
+use function ord;
 use function preg_match;
 use function preg_split;
 use function property_exists;
@@ -80,6 +83,14 @@ class Browser implements ClientInterface {
     private const HTTP2_PRIOR_KNOWLEDGE = 5;
     private const HTTP3 = 30;
     private const HTTP3_ONLY = 31;
+
+    /**
+     * libcurl ABI values for CURLOPT_PREREQFUNCTION / CURL_PREREQFUNC_* (libcurl 7.80+).
+     * PHP only exposes the constants as of 8.4, so they are duplicated here.
+     */
+    private const PREREQFUNCTION = 20312;
+    private const PREREQFUNC_OK = 0;
+    private const PREREQFUNC_ABORT = 1;
 
     protected bool $disableCurlCache = false;
 
@@ -126,6 +137,8 @@ class Browser implements ClientInterface {
     private int $maximumSize = 16777216; // 16 MiB = 2^24 bytes;
 
     private bool $obeySuccessCode = true;
+
+    private bool $ssrfProtection = false;
 
     private int $httpVersion = CURL_HTTP_VERSION_NONE;
     private \CurlShareHandle $curlShare;
@@ -305,6 +318,28 @@ class Browser implements ClientInterface {
         ));
     }
 
+    /**
+     * Reject requests that connect to a non-public address (loopback, private,
+     * link-local, CGNAT, multicast, ...). The check runs after the connection is
+     * established but before any request is sent, for every new or reused
+     * connection and every redirect hop, so DNS rebinding and obfuscated
+     * IP-literal hosts cannot bypass it.
+     *
+     * Requires PHP 8.4+ (CURLOPT_PREREQFUNCTION). Enabling it on older versions
+     * throws instead of silently doing nothing. Disabled by default; proxies are
+     * not inspected (the proxy's address is what gets checked).
+     */
+    public function withSsrfProtection(bool $enabled = true)
+    {
+        if ($enabled && !defined('CURLOPT_PREREQFUNCTION')) {
+            throw new \RuntimeException('SSRF protection requires PHP 8.4+ (CURLOPT_PREREQFUNCTION)');
+        }
+
+        return $this->withOptions(array(
+            'ssrfProtection' => $enabled,
+        ));
+    }
+
     public function withProtocolVersion(string $protocolVersion)
     {
         $version = match($protocolVersion) {
@@ -431,6 +466,14 @@ class Browser implements ClientInterface {
 
         $curl_opts[CURLOPT_URL] = (string)$url;
 
+        if ($this->ssrfProtection) {
+            //runs after connect/TLS but before the request is sent; aborting rejects
+            //the promise with CURLE_ABORTED_BY_CALLBACK in curlTick()
+            $curl_opts[self::PREREQFUNCTION] = static function (CurlHandle $curl, string $primaryIp, string $localIp, int $primaryPort, int $localPort): int {
+                return self::isBlockedAddress($primaryIp) ? self::PREREQFUNC_ABORT : self::PREREQFUNC_OK;
+            };
+        }
+
         /**
          * Explicit timeout, otherwise PHP's default_socket_timeout like react/http.
          *  withTimeout(false)/0/negative disables it; constructor CURLOPT_TIMEOUT(_MS) takes precedence.
@@ -478,6 +521,25 @@ class Browser implements ClientInterface {
                 }
             }
         }
+    }
+
+    /**
+     * True for loopback, private, link-local, CGNAT, multicast and other
+     * non-public destinations. Unparsable input fails closed.
+     */
+    private static function isBlockedAddress(string $ip) : bool {
+        //FILTER_FLAG_GLOBAL_RANGE (PHP 8.2+) rejects loopback, private, link-local, CGNAT,
+        //benchmarking, documentation and reserved ranges, and all IPv4-mapped IPv6 addresses
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_GLOBAL_RANGE) === false) {
+            return true;
+        }
+
+        $binary = (string)@inet_pton($ip);
+        if (strlen($binary) === 4) {
+            return (ord($binary[0]) & 0xF0) === 0xE0; //multicast 224/4 is not filtered by GLOBAL_RANGE
+        }
+
+        return $binary[0] === "\xff"; //IPv6 multicast ff00::/8 is not filtered by GLOBAL_RANGE
     }
 
     /**
@@ -753,6 +815,9 @@ class Browser implements ClientInterface {
                     unset($this->state->inProgress[$mh]);
                     if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
                         $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
+                    } elseif ($info['result'] === CURLE_ABORTED_BY_CALLBACK && $this->ssrfProtection) {
+                        //the pre-request callback refused a non-public destination before sending the request
+                        $deferred->reject(new \RuntimeException('Request to blocked address ' . (string)curl_getinfo($curl, CURLINFO_PRIMARY_IP) . ' refused', CURLE_ABORTED_BY_CALLBACK));
                     } else {
                         $deferred->reject(new \RuntimeException(curl_strerror($info['result']) ?? ('cURL error ' . $info['result']), $info['result']));
                     }
