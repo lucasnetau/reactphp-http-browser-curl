@@ -17,7 +17,7 @@
     "fig/http-message-util": "^1.1",
     "guzzlehttp/psr7": "^2.6",
     "psr/http-client": "^1.0.3",
-    "psr/http-message": "^1.0.1",
+    "psr/http-message": "^1.0.1 || ^2.0",
     "react/async": "^4 || ^3 || ^2",
     "react/event-loop": "^1.2",
     "react/http": "^v1.11",

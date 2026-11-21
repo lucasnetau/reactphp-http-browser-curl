@@ -58,7 +58,7 @@ class FunctionalTest extends \React\Tests\Http\TestCase
                             '/file/10mb' => self::streamFile(10240),
                             '/file/50mb' => self::streamFile(51200),
                             '/file/sleep' => self::latency(),
-                            '/500' => Response::plaintext('500 Error')->withStatus('500'),
+                            '/500' => Response::plaintext('500 Error')->withStatus(500),
                             default => Response::plaintext(
                                 "Hello World!\n"
                             ),
