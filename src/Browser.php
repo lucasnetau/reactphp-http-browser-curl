@@ -668,12 +668,16 @@ class Browser implements ClientInterface {
                 $xfer += $len;
 
                 if ($xfer > $this->maximumSize) {
-                    $transaction = $this->state->inProgress[$multi];
-                    unset($this->state->inProgress[$multi]);
-                    $transaction->deferred->reject(new \OverflowException(
-                        'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
-                        \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
-                    ));
+                    // Record the failure and abort the transfer, but do not remove the transaction
+                    // from inProgress or settle the promise here: this runs inside a libcurl
+                    // callback, where removing/closing cURL handles is not allowed. curlTick()
+                    // rejects the promise and closes the handles once curl_multi_exec() returns.
+                    if ($this->state->inProgress->offsetExists($multi) && $this->state->inProgress[$multi]->error === null) {
+                        $this->state->inProgress[$multi]->error = new \OverflowException(
+                            'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
+                            \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
+                        );
+                    }
                     return 0;
                 }
 
@@ -782,6 +786,14 @@ class Browser implements ClientInterface {
                     curl_multi_exec($mh, $still_running);
                 }
 
+                //A promise handler may have cancelled this request while cURL was delivering
+                //data from inside curl_multi_exec(); its transaction must not be used again here.
+                //PHPStan cannot see this re-entrant state change.
+                if (!$this->state->inProgress->offsetExists($mh) || $transaction->isClosed()) { // @phpstan-ignore booleanOr.rightAlwaysFalse
+                    unset($this->state->inProgress[$mh]);
+                    continue;
+                }
+
                 if ($still_running) {
                     if ($nextIterationTimeout !== 0 && $this->state->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
                         $nextIterationTimeout = 0.0001;
@@ -793,7 +805,7 @@ class Browser implements ClientInterface {
                 $info = curl_multi_info_read($mh);
                 if ($info === false) {
                     unset($this->state->inProgress[$mh]);
-                    $deferred->reject(new \RuntimeException("curl_multi_info_read returned error on completion"));
+                    $deferred->reject($transaction->error ?? new \RuntimeException("curl_multi_info_read returned error on completion"));
                     $transaction->close();
                     continue;
                 }
@@ -803,7 +815,11 @@ class Browser implements ClientInterface {
                     $transaction->file->end();
                 }
 
-                if ($info['result'] === CURLE_OK) {
+                if ($transaction->error !== null) {
+                    //a cURL callback aborted the transfer; reject only now, outside the callback
+                    unset($this->state->inProgress[$mh]);
+                    $deferred->reject($transaction->error);
+                } elseif ($info['result'] === CURLE_OK) {
                     try {
                         $res = $this->resolveResponse($mh, $curl);
                         unset($this->state->inProgress[$mh]);

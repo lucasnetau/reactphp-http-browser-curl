@@ -381,6 +381,36 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         (new Browser())->withResponseBuffer($size);
     }
 
+    public function testResponseBufferOverflowIsRejectedOutsideCurlCallback(): void
+    {
+        $insideCurlCallback = false;
+
+        $promise = (new Browser([CURLOPT_TIMEOUT => 10]))
+            ->withResponseBuffer(1024)
+            ->get(self::$testServerAddress . '/file/128kb');
+
+        $promise->then(null, static function (\OverflowException $e) use (&$insideCurlCallback): void {
+            foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $frame) {
+                if (($frame['function'] ?? '') === 'curl_multi_exec') {
+                    $insideCurlCallback = true;
+                    break;
+                }
+            }
+        });
+
+        try {
+            \React\Async\await($promise);
+            $this->fail('Expected OverflowException');
+        } catch (\OverflowException $e) {
+            $this->assertMatchesRegularExpression(
+                '/^Response body size of \d+ bytes exceeds maximum of 1024 bytes$/',
+                $e->getMessage()
+            );
+        }
+
+        $this->assertFalse($insideCurlCallback, 'Request was rejected from inside curl_multi_exec()');
+    }
+
     public function testResponseCompressionIsDecodedWhenAcceptEncodingRequested(): void
     {
         $browser = new Browser([CURLOPT_ACCEPT_ENCODING => '']);
