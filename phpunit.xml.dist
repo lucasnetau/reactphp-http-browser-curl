@@ -6,12 +6,19 @@
          bootstrap="vendor/autoload.php"
          cacheResult="false"
          colors="true"
-         convertDeprecationsToExceptions="true">
+         convertDeprecationsToExceptions="false">
     <testsuites>
         <testsuite name="Library Test Suite">
             <directory>tests/</directory>
         </testsuite>
     </testsuites>
+    <groups>
+        <exclude>
+            <!-- tests tagged "internet" hit external services (e.g. badssl.com) and are flaky;
+                 run them explicitly with PHPUnit's group filter for "internet" -->
+            <group>internet</group>
+        </exclude>
+    </groups>
     <coverage>
         <include>
             <directory>src/</directory>

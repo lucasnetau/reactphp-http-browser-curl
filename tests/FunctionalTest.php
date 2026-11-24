@@ -76,9 +76,9 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         $socket = new \React\Socket\SocketServer('127.0.0.1:0');
         self::$connections = new \SplObjectStorage();
         $socket->on('connection', static function (\React\Socket\ConnectionInterface $connection) {
-            self::$connections->attach($connection);
+            self::$connections->offsetSet($connection);
             $connection->on('close', static function () use ($connection) {
-                self::$connections->detach($connection);
+                self::$connections->offsetUnset($connection);
             });
         });
         $server->listen($socket);
@@ -92,7 +92,7 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         self::$server = null;
         foreach (self::$connections as $connection) {
             $connection->close();
-            self::$connections->detach($connection);
+            self::$connections->offsetUnset($connection);
         }
         self::$socket?->close();
         self::$socket = null;
@@ -468,4 +468,79 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         }
     }
 
+    public function testBufferedResponseBodiesRemainReadableAfterPromiseAllSettles(): void
+    {
+        $browser = new Browser([CURLOPT_TIMEOUT => 30]);
+
+        // The aggregate handler runs after every transaction's completing tick wrote its
+        // body; the bodies must still be open (ownership moved to the PSR-7 stream).
+        $responses = \React\Async\await(\React\Promise\all([
+            $browser->get(self::$testServerAddress . '/helloworld'),
+            $browser->get(self::$testServerAddress . '/helloworld'),
+            $browser->get(self::$testServerAddress . '/helloworld'),
+        ]));
+
+        foreach ($responses as $response) {
+            $this->assertSame("Hello World!\n", (string)$response->getBody());
+        }
+    }
+
+    public function testCancelAllFromStreamingResponseCallbackDoesNotBreakCurlHandles(): void
+    {
+        $browser = new Browser([CURLOPT_TIMEOUT => 30]);
+
+        $browser->requestStreaming('GET', self::$testServerAddress . '/file/5mb')->then(
+            static function () use ($browser): void {
+                // This handler runs inside curl_multi_exec()'s write callback: cancelling
+                // must not remove the executing easy handle from its multi handle.
+                $browser->cancelAll();
+            }
+        );
+
+        // Let the interrupted transfer unwind; the old behaviour emitted
+        // "CURLOPT_WRITEHEADER resource has gone away" here (a test failure under PHPUnit).
+        \React\Async\await(\React\Promise\Timer\sleep(0.1));
+
+        $this->assertTrue($browser->isIdle());
+
+        $response = \React\Async\await($browser->get(self::$testServerAddress . '/helloworld'));
+        $this->assertSame("Hello World!\n", (string)$response->getBody());
+    }
+
+    public function reservedCurlOptions(): array
+    {
+        return [
+            'write function' => [CURLOPT_WRITEFUNCTION],
+            'read function' => [CURLOPT_READFUNCTION],
+            'header function' => [CURLOPT_HEADERFUNCTION],
+            'file' => [CURLOPT_FILE],
+            'write header' => [CURLOPT_WRITEHEADER],
+            'xferinfo function' => [CURLOPT_XFERINFOFUNCTION],
+        ];
+    }
+
+    /** @dataProvider reservedCurlOptions */
+    public function testReservedCurlOptionsAreRejected(int $option): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('managed by the transport');
+
+        new Browser([$option => static fn () => 0]);
+    }
+
+    public function testCurlOptHeaderTrueIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('CURLOPT_HEADER must be false');
+
+        new Browser([CURLOPT_HEADER => true]);
+    }
+
+    public function testCurlOptHeaderFalseRemainsAllowed(): void
+    {
+        $browser = new Browser([CURLOPT_HEADER => false, CURLOPT_TIMEOUT => 10]);
+
+        $response = \React\Async\await($browser->get(self::$testServerAddress . '/helloworld'));
+        $this->assertSame("Hello World!\n", (string)$response->getBody());
+    }
 }

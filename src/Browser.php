@@ -75,6 +75,25 @@ class Browser implements ClientInterface {
     /** Largest response body prefix kept in memory before spilling to a temporary file */
     private const MAX_BUFFERED_MEMORY = 16777216; //16 MiB
 
+    /** Largest total size of response headers (all redirect hops and 1xx responses included) */
+    private const MAX_RESPONSE_HEADER_SIZE = 262144; //256 KiB
+
+    /**
+     * cURL options whose behaviour the transport itself relies on. Setting them from user
+     * options would corrupt response routing (bodies/headers going to unexpected places),
+     * so they are rejected in the constructor instead of being silently ignored/overridden.
+     */
+    private const RESERVED_CURL_OPTIONS = [
+        CURLOPT_FILE => 'CURLOPT_FILE',
+        CURLOPT_WRITEHEADER => 'CURLOPT_WRITEHEADER',
+        CURLOPT_HEADERFUNCTION => 'CURLOPT_HEADERFUNCTION',
+        CURLOPT_WRITEFUNCTION => 'CURLOPT_WRITEFUNCTION',
+        CURLOPT_READFUNCTION => 'CURLOPT_READFUNCTION',
+        CURLOPT_INFILE => 'CURLOPT_INFILE',
+        CURLOPT_XFERINFOFUNCTION => 'CURLOPT_XFERINFOFUNCTION',
+        CURLOPT_PROGRESSFUNCTION => 'CURLOPT_PROGRESSFUNCTION',
+    ];
+
     /**
      * libcurl ABI values for protocol-version constants missing from older PHP/libcurl
      * builds (CURL_HTTP_VERSION_3/_3ONLY are only defined with PHP 8.3+).
@@ -148,6 +167,8 @@ class Browser implements ClientInterface {
      * @param array $options
      */
     public function __construct(protected array $options = [], protected ?EventLoop\LoopInterface $loop = null) {
+        $this->assertValidOptions($options);
+
         if (!isset($this->loop)) {
             $this->loop = EventLoop\Loop::get();
         }
@@ -160,6 +181,30 @@ class Browser implements ClientInterface {
         curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
         curl_share_setopt($share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
         $this->curlShare = $share;
+    }
+
+    /**
+     * Reject constructor options that would fight with the transport's own cURL handling.
+     *
+     * @param array<int, mixed> $options
+     */
+    private function assertValidOptions(array $options) : void {
+        foreach ($options as $option => $value) {
+            if ($value !== null && isset(self::RESERVED_CURL_OPTIONS[$option])) {
+                throw new \InvalidArgumentException(
+                    self::RESERVED_CURL_OPTIONS[$option] . ' is managed by the transport and cannot be configured on the Browser'
+                );
+            }
+        }
+
+        $headerOption = $options[CURLOPT_HEADER] ?? false;
+        if ($headerOption !== false && $headerOption !== 0 && $headerOption !== null) {
+            throw new \InvalidArgumentException('CURLOPT_HEADER must be false: response headers are parsed by the transport');
+        }
+
+        if (array_key_exists(CURLOPT_POSTFIELDS, $options)) {
+            throw new \InvalidArgumentException('CURLOPT_POSTFIELDS is managed by the transport; pass the body to request() instead');
+        }
     }
 
     public function isIdle() : bool {
@@ -423,6 +468,24 @@ class Browser implements ClientInterface {
             return Promise\reject($e);
         }
 
+        //a non-numeric Content-Length would be silently coerced to 0 by cURL while the
+        //malformed header still goes out on the wire: validate and normalise it instead
+        if (array_key_exists('content-length', $headers)) {
+            $contentLengths = is_array($headers['content-length']) ? $headers['content-length'] : [$headers['content-length']];
+            $contentLength = null;
+            foreach ($contentLengths as $value) {
+                if (is_int($value)) {
+                    $value = (string)$value;
+                }
+                if (!\is_string($value) || preg_match('/^\d+$/', $value) !== 1) {
+                    return Promise\reject(new \InvalidArgumentException('Invalid Content-Length header given'));
+                }
+                $contentLength ??= $value;
+            }
+            //send exactly one numeric value, matching the upload size set below
+            $headers['content-length'] = $contentLength ?? '0';
+        }
+
         $curl = $this->initCurl();
 
         //HEAD and TRACE must not include content (RFC 9110); POST/PUT/PATCH send Content-Length: 0 when empty
@@ -443,7 +506,8 @@ class Browser implements ClientInterface {
                     return $upload->read($length);
                 });
                 if (array_key_exists('content-length', $headers)) {
-                    curl_setopt($curl, CURLOPT_INFILESIZE, is_array($headers['content-length']) ? $headers['content-length'][0] : $headers['content-length']);
+                    //validated and normalised to a numeric string before the cURL handle was created
+                    curl_setopt($curl, CURLOPT_INFILESIZE, (int)$headers['content-length']);
                     $headers['transfer-encoding'] = '';
                 }
             } else {
@@ -534,7 +598,11 @@ class Browser implements ClientInterface {
             return true;
         }
 
-        $binary = (string)@inet_pton($ip);
+        $binary = @inet_pton($ip);
+        if (!\is_string($binary) || $binary === '') {
+            return true; //unparsable input fails closed
+        }
+
         if (strlen($binary) === 4) {
             return (ord($binary[0]) & 0xF0) === 0xE0; //multicast 224/4 is not filtered by GLOBAL_RANGE
         }
@@ -565,7 +633,8 @@ class Browser implements ClientInterface {
             throw new \RuntimeException('Unable to init curl');
         }
 
-        //@TODO remove any options that will conflict with out internal working. Eg CURLOPT_FILE, CURLOPT_WRITEHEADER, etc.
+        //conflicting options (CURLOPT_FILE/WRITEHEADER/...FUNCTION, CURLOPT_HEADER,
+        //CURLOPT_POSTFIELDS) are rejected by assertValidOptions() in the constructor
         $options = $this->options + self::DEFAULT_CURL_OPTIONS;
 
         if ($this->disableCurlCache) {
@@ -612,18 +681,48 @@ class Browser implements ClientInterface {
         if ($headerHandle === false) {
             throw new \RuntimeException('Unable to create temporary file for response headers');
         }
-        curl_setopt($curl, CURLOPT_WRITEHEADER, $headerHandle);
 
         $multi = $this->initMulti($curl);
+
+        //Collect raw response headers (all hops) through a callback so their total size can be
+        //bounded: a malicious server could otherwise exhaust memory with an endless header block.
+        $headerBytes = 0;
+        curl_setopt($curl, CURLOPT_HEADERFUNCTION, function($curl, $data) use ($headerHandle, $multi, &$headerBytes) {
+            $length = strlen($data);
+            $headerBytes += $length;
+
+            if ($headerBytes > self::MAX_RESPONSE_HEADER_SIZE) {
+                //record the failure and abort the transfer, but do not touch the transaction's
+                //cURL handles here: this runs inside a libcurl callback (see curlTick())
+                if ($this->state->inProgress->offsetExists($multi) && $this->state->inProgress[$multi]->error === null) {
+                    $this->state->inProgress[$multi]->error = new \OverflowException(
+                        'Response headers size of ' . $headerBytes . ' bytes exceeds maximum of ' . self::MAX_RESPONSE_HEADER_SIZE . ' bytes',
+                        \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
+                    );
+                }
+                return 0;
+            }
+
+            $written = fwrite($headerHandle, $data);
+            return $written === false ? 0 : $written;
+        });
 
         if ($this->streaming) {
             $responseBody = new ThroughStream();
             $pauseRequested = false;
             curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi, &$pauseRequested) {
                 static $first = true;
+
+                //a promise handler running inside this callback may have cancelled the
+                //request (cancelAll()): the transaction is gone or closing and the
+                //transfer must be aborted instead of writing more data
+                if (!$this->state->inProgress->offsetExists($multi) || $this->state->inProgress[$multi]->isClosed()) {
+                    return 0;
+                }
+                $transaction = $this->state->inProgress[$multi];
+
                 if ($first) {
                     try {
-                        $transaction = $this->state->inProgress[$multi];
                         $res = $this->resolveResponse($multi, $curl);
                         $transaction->deferred->resolve($res);
                     } catch (Throwable $ex) {
@@ -635,6 +734,10 @@ class Browser implements ClientInterface {
                         }
                     }
                     $first = false;
+
+                    if ($transaction->isClosed()) {
+                        return 0; //handler cancelled the request: abort the transfer
+                    }
                 }
 
                 if (!$responseBody->isWritable()) {
@@ -728,9 +831,9 @@ class Browser implements ClientInterface {
             $deferred->reject($error);
         });
 
-        $this->state->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle);
+        $this->state->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle, $this->state);
 
-        curl_multi_exec($multi, $_); //GEt it started
+        $this->execCurlMulti($multi); //Get it started
 
         //Kickstart the tick handler; it keeps running until all shared requests are done
         $this->scheduleTick(0.0);
@@ -759,6 +862,42 @@ class Browser implements ClientInterface {
         }
     }
 
+    /**
+     * Run curl_multi_exec() while tracking that a libcurl callback may be on the stack.
+     *
+     * libcurl forbids removing an easy handle from a multi handle from within any of its
+     * callbacks, so transactions closed re-entrantly (e.g. cancelAll() from a streaming
+     * response handler) are queued by Transaction::close() and released here as soon as
+     * the outermost curl_multi_exec() call has returned.
+     */
+    private function execCurlMulti(CurlMultiHandle $multi): int {
+        $state = $this->state;
+        $stillRunning = 0;
+
+        ++$state->curlCallbackDepth;
+        try {
+            curl_multi_exec($multi, $stillRunning);
+        } finally {
+            if (--$state->curlCallbackDepth === 0) {
+                $this->flushPendingTeardown();
+            }
+        }
+
+        return $stillRunning;
+    }
+
+    private function flushPendingTeardown(): void {
+        if ($this->state->pendingTeardown === []) {
+            return;
+        }
+
+        $pending = $this->state->pendingTeardown;
+        $this->state->pendingTeardown = [];
+        foreach ($pending as $transaction) {
+            $transaction->closeNow();
+        }
+    }
+
     private function curlTick(): void
     {
         if ($this->state->tickTimer !== null) {
@@ -776,14 +915,14 @@ class Browser implements ClientInterface {
                     unset($this->state->inProgress[$mh]);
                     continue;
                 }
-                curl_multi_exec($mh, $still_running);
+                $still_running = $this->execCurlMulti($mh);
 
                 //Drain all immediately available data before returning to the event loop:
                 //each write callback gets at most 16 KiB, and a full loop iteration costs
                 //far more than the read it delivers.
                 while ($still_running && $drainBudget-- > 0 && curl_multi_select($mh, 0) > 0) {
                     $nextIterationTimeout = 0;
-                    curl_multi_exec($mh, $still_running);
+                    $still_running = $this->execCurlMulti($mh);
                 }
 
                 //A promise handler may have cancelled this request while cURL was delivering
@@ -855,15 +994,22 @@ class Browser implements ClientInterface {
      */
     private function resolveResponse(CurlMultiHandle $mh, CurlHandle $curl): ResponseInterface
     {
-        $responseBody = $this->state->inProgress[$mh]->file;
+        $transaction = $this->state->inProgress[$mh];
+        $responseBody = $transaction->file;
         if (is_resource($responseBody)) {
             stream_set_blocking($responseBody, false);
             rewind($responseBody);
-            $responseBody = Utils::streamFor($responseBody);
+            $stream = Utils::streamFor($responseBody);
+            //Hand ownership of the php://temp stream to the PSR-7 body: Guzzle closes it
+            //when the response is released. Transaction teardown must not fclose it here,
+            //otherwise responses read after the resolving tick (e.g. from a Promise\all()
+            //handler) would operate on a closed stream.
+            $transaction->file = null;
+            $responseBody = $stream;
         }
 
         /** @var resource $responseHeaderHandle */
-        $responseHeaderHandle = $this->state->inProgress[$mh]->headers;
+        $responseHeaderHandle = $transaction->headers;
         rewind($responseHeaderHandle);
         $headers = stream_get_contents($responseHeaderHandle);
         //@TODO implement ReactPHP Browser withRejectErrorResponse support

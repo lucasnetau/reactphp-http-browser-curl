@@ -211,7 +211,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
             });
             $conn->on('close', function() use (&$timer, $conn) {
                 Loop::cancelTimer($timer);
-                $this->connectionList->detach($conn);
+                $this->connectionList->offsetUnset($conn);
             });
         });
 
@@ -232,7 +232,7 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         $this->socket->close();
         foreach($this->connectionList as $conn) {
             $conn->close();
-            $this->connectionList->detach($conn);
+            $this->connectionList->offsetUnset($conn);
         }
         $this->socket = null;
     }
@@ -1164,5 +1164,59 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
         }
 
         $this->assertTrue($this->browser->isIdle());
+    }
+
+    public function testResponseHeadersExceedingMaximumAreRejected()
+    {
+        $socket = new SocketServer('127.0.0.1:0');
+        $socket->on('connection', function (ConnectionInterface $connection) {
+            $connection->on('data', function () use ($connection) {
+                $headers = "HTTP/1.1 200 OK\r\n";
+                for ($i = 0; $i < 40; $i++) {
+                    $headers .= 'X-Filler-' . $i . ': ' . str_repeat('a', 8192) . "\r\n";
+                }
+                $headers .= "Content-Length: 2\r\nConnection: close\r\n\r\nok";
+                $connection->write($headers);
+            });
+        });
+        $base = str_replace('tcp:', 'http:', $socket->getAddress()) . '/';
+
+        try {
+            $this->setExpectedException(\OverflowException::class, 'Response headers size of ');
+            \React\Async\await((new Browser([CURLOPT_TIMEOUT => 10]))->get($base));
+        } finally {
+            $socket->close();
+        }
+    }
+
+    public function testPostStreamWithNonNumericContentLengthIsRejected()
+    {
+        $stream = new ThroughStream();
+
+        $this->setExpectedException(\InvalidArgumentException::class, 'Invalid Content-Length header given');
+        \React\Async\await($this->browser->post($this->base . 'post', ['Content-Length' => 'abc'], $stream));
+    }
+
+    public function testPostStreamWithArrayContentLengthContainingNonNumericValueIsRejected()
+    {
+        $stream = new ThroughStream();
+
+        $this->setExpectedException(\InvalidArgumentException::class, 'Invalid Content-Length header given');
+        \React\Async\await($this->browser->post($this->base . 'post', ['Content-Length' => ['12', 'nope']], $stream));
+    }
+
+    public function testPostStreamWithNumericContentLengthIsSentOnTheWire()
+    {
+        $stream = new ThroughStream();
+        Loop::addTimer(0.001, static function () use ($stream) {
+            $stream->end('hello world');
+        });
+
+        $response = \React\Async\await($this->browser->post($this->base . 'post', ['Content-Length' => '11'], $stream));
+        $data = json_decode((string)$response->getBody(), true);
+
+        $this->assertEquals('hello world', $data['data']);
+        //custom request headers are sent lower-cased; exact casing is not significant
+        $this->assertEquals('11', array_change_key_case($data['headers'], CASE_LOWER)['content-length']);
     }
 }

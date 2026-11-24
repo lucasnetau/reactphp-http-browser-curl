@@ -195,9 +195,9 @@ class PerformanceTest extends \React\Tests\Http\TestCase
 
         self::$socket = new SocketServer('127.0.0.1:0');
         self::$socket->on('connection', static function (ConnectionInterface $connection) {
-            self::$connections->attach($connection);
+            self::$connections->offsetSet($connection);
             $connection->on('close', static function () use ($connection) {
-                self::$connections->detach($connection);
+                self::$connections->offsetUnset($connection);
             });
         });
         self::$http->listen(self::$socket);
@@ -209,7 +209,7 @@ class PerformanceTest extends \React\Tests\Http\TestCase
         self::$http = null;
         foreach (self::$connections as $connection) {
             $connection->close();
-            self::$connections->detach($connection);
+            self::$connections->offsetUnset($connection);
         }
         self::$socket?->close();
         self::$socket = null;

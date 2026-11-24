@@ -51,6 +51,8 @@ Only `http://` and `https://` request URLs are accepted; any other scheme is rej
 
 `withBase()` is a convenience for resolving relative URLs, not a host allow-list: absolute and protocol-relative URLs replace the base entirely (matching react/http). Allow-list hosts yourself if request URLs can come from untrusted input.
 
+Response headers are capped at 256 KiB per transfer (all redirect hops included); larger header blocks abort with an `OverflowException` instead of exhausting memory. A `Content-Length` header supplied for a streamed upload must be numeric, otherwise the request is rejected. Constructor options that the transport relies on (`CURLOPT_FILE`, `CURLOPT_WRITEHEADER`, `CURLOPT_HEADERFUNCTION`, `CURLOPT_WRITEFUNCTION`, `CURLOPT_READFUNCTION`, `CURLOPT_INFILE`, `CURLOPT_XFERINFOFUNCTION`, `CURLOPT_PROGRESSFUNCTION`, `CURLOPT_HEADER` other than `false`, and `CURLOPT_POSTFIELDS`) are rejected with an `InvalidArgumentException` rather than silently corrupting response handling.
+
 `$browser->withSsrfProtection()` rejects requests that connect to a non-public address (loopback, RFC 1918, link-local, CGNAT, multicast, unique-local IPv6, and IPv4-mapped IPv6 addresses). The check uses `CURLOPT_PREREQFUNCTION` and runs after the connection is established but before any request is sent, on every connection and every redirect hop, so DNS rebinding and obfuscated IP literals (`127.1`, decimal/hex forms) cannot bypass it. It is **disabled by default** and requires **PHP 8.4+**; enabling it on older PHP throws a `RuntimeException` rather than silently doing nothing. Note that the TCP/TLS handshake still happens before the check, and a configured proxy is not inspected (the proxy's address is checked instead).
 
 ```php
