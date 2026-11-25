@@ -489,9 +489,13 @@ class Browser implements ClientInterface {
             }
         }
 
+        //user headers take precedence over Browser defaults; merge them once here and reuse
+        //the merged map for validation, the Connection check and the CURLOPT_HTTPHEADER build
+        $headers = $headers + array_change_key_case($this->defaultHeaders);
+
         try {
             //CR/LF and other control characters in a name/value would be injected as extra wire headers
-            $this->assertValidHeaders($headers + array_change_key_case($this->defaultHeaders));
+            $this->assertValidHeaders($headers);
         } catch (\InvalidArgumentException $e) {
             return Promise\reject($e);
         }
@@ -574,8 +578,6 @@ class Browser implements ClientInterface {
         if ($timeout > 0 && !array_key_exists(CURLOPT_TIMEOUT, $this->options) && !array_key_exists(CURLOPT_TIMEOUT_MS, $this->options)) {
             $curl_opts[CURLOPT_TIMEOUT_MS] = (int) round($timeout * 1000);
         }
-
-        $headers = $headers + array_change_key_case($this->defaultHeaders);
 
         $connection = $headers['connection'] ?? '';
         if (is_array($connection)) {
