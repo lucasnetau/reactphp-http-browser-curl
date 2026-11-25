@@ -28,6 +28,15 @@ final class BrowserState {
     public bool $tickScheduled = false;
 
     /**
+     * Current poll interval while transfers are in flight but waiting on the network.
+     * Starts at the active interval and grows (capped) after a short idle period.
+     */
+    public float $idleTickInterval = 0.001;
+
+    /** Consecutive curlTick runs without socket activity, used to back off idle polling */
+    public int $idleTicks = 0;
+
+    /**
      * Number of curl_multi_exec() calls currently on the stack. libcurl forbids removing
      * an easy handle from a multi handle from within any of its callbacks, so Transaction
      * teardown requested while this is positive is queued in $pendingTeardown and performed

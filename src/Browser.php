@@ -78,6 +78,15 @@ class Browser implements ClientInterface {
     /** Largest total size of response headers (all redirect hops and 1xx responses included) */
     private const MAX_RESPONSE_HEADER_SIZE = 262144; //256 KiB
 
+    /** Poll interval while transfers are in flight and socket data is available/expected */
+    private const ACTIVE_TICK_INTERVAL = 0.001; //1 ms
+
+    /** Consecutive idle ticks (≈ milliseconds) before the idle poll interval starts doubling */
+    private const IDLE_TICKS_BEFORE_BACKOFF = 50;
+
+    /** Upper bound for the idle poll interval: 20 ms ≈ 50 wake-ups/s while waiting on the network */
+    private const MAX_IDLE_TICK_INTERVAL = 0.02;
+
     /**
      * cURL options whose behaviour the transport itself relies on. Setting them from user
      * options would corrupt response routing (bodies/headers going to unexpected places),
@@ -544,8 +553,11 @@ class Browser implements ClientInterface {
         if ($bodyAllowed && ($hasBody || $expectsBody)) {
             if ($body instanceof ReadableStreamInterface) {
                 $upload = new UploadBodyStream($body);
-                $upload->on('continue', static function () use ($curl) {
+                $upload->on('continue', function () use ($curl) {
                     curl_pause($curl, CURLPAUSE_CONT);
+                    //source data arrived: wake the tick handler instead of waiting for the
+                    //next idle poll
+                    $this->wakeTick();
                 });
 
                 curl_setopt($curl, CURLOPT_PUT, true);
@@ -804,9 +816,12 @@ class Browser implements ClientInterface {
                 }
                 return strlen($data);
             });
-            $responseBody->on('drain', static function () use ($curl, &$pauseRequested) {
+            $responseBody->on('drain', function () use ($curl, &$pauseRequested) {
                 $pauseRequested = false;
                 curl_pause($curl, CURLPAUSE_CONT);
+                //cURL may hold buffered data after resuming: wake the tick handler now
+                //instead of waiting for the next idle poll
+                $this->wakeTick();
             });
             $responseBody->on('close', static function () use ($curl) {
                 //if paused, let the write callback run once more to observe the closed stream and abort
@@ -887,8 +902,12 @@ class Browser implements ClientInterface {
 
         $this->execCurlMulti($multi); //Get it started
 
-        //Kickstart the tick handler; it keeps running until all shared requests are done
-        $this->scheduleTick(0.0);
+        //a new request may produce data soon: reset idle back-off and replace any pending
+        //back-off timer with an immediate tick, then keep the tick handler running until all
+        //shared requests are done
+        $this->state->idleTicks = 0;
+        $this->state->idleTickInterval = self::ACTIVE_TICK_INTERVAL;
+        $this->wakeTick();
 
         return $deferred->promise();
     }
@@ -912,6 +931,19 @@ class Browser implements ClientInterface {
         } else {
             $this->loop->futureTick($this->curlTick(...));
         }
+    }
+
+    /**
+     * Wake the tick handler immediately, cancelling any pending idle back-off timer.
+     */
+    private function wakeTick(): void
+    {
+        if ($this->state->tickTimer !== null) {
+            $this->loop?->cancelTimer($this->state->tickTimer);
+            $this->state->tickTimer = null;
+            $this->state->tickScheduled = false;
+        }
+        $this->scheduleTick(0.0);
     }
 
     /**
@@ -958,10 +990,12 @@ class Browser implements ClientInterface {
             $this->state->tickTimer = null;
         }
 
-        $nextIterationTimeout = 0.001; //poll at most every 1ms while a transfer is in flight
+        $nextIterationTimeout = self::ACTIVE_TICK_INTERVAL;
         $drainBudget = 256; //yield to the event loop after at most 4 MiB so timers/other requests stay responsive
         $stillRunning = false;
         $uploading = false;
+        $dataFlowing = false;
+        $progressed = false;
         try {
             //Collect every distinct multi handle currently in use: one per request in the
             //default mode, or a single shared handle with withSharedMultiHandle().
@@ -996,7 +1030,7 @@ class Browser implements ClientInterface {
                 //each write callback gets at most 16 KiB, and a full loop iteration costs
                 //far more than the read it delivers.
                 while ($running && $drainBudget-- > 0 && curl_multi_select($mh, 0) > 0) {
-                    $nextIterationTimeout = 0;
+                    $dataFlowing = true;
                     $running = $this->execCurlMulti($mh);
                 }
                 if ($running) {
@@ -1020,6 +1054,7 @@ class Browser implements ClientInterface {
                         continue;
                     }
                     $result = $info['result'] ?? CURLE_OK;
+                    $progressed = true;
                     $this->completeTransaction($transaction, is_int($result) ? $result : CURLE_OK);
                 }
 
@@ -1042,8 +1077,33 @@ class Browser implements ClientInterface {
                 }
             }
 
-            if ($stillRunning && $nextIterationTimeout !== 0 && $uploading) {
-                $nextIterationTimeout = 0.0001;
+            if ($stillRunning) {
+                if ($uploading) {
+                    //an upload source may produce data at any time: stay responsive
+                    $this->state->idleTicks = 0;
+                    $this->state->idleTickInterval = self::ACTIVE_TICK_INTERVAL;
+                    $nextIterationTimeout = 0.0001;
+                } elseif ($dataFlowing) {
+                    //socket data is queued: drain it on the next loop iteration
+                    $this->state->idleTicks = 0;
+                    $this->state->idleTickInterval = self::ACTIVE_TICK_INTERVAL;
+                    $nextIterationTimeout = 0;
+                } elseif ($progressed) {
+                    //a transfer completed (and may have started new ones): poll promptly
+                    $this->state->idleTicks = 0;
+                    $this->state->idleTickInterval = self::ACTIVE_TICK_INTERVAL;
+                    $nextIterationTimeout = self::ACTIVE_TICK_INTERVAL;
+                } else {
+                    //waiting on the network: poll at 1 ms briefly, then back off so long
+                    //transfers do not cost a wake-up every millisecond
+                    if (++$this->state->idleTicks >= self::IDLE_TICKS_BEFORE_BACKOFF) {
+                        $this->state->idleTickInterval = min(
+                            $this->state->idleTickInterval * 2,
+                            self::MAX_IDLE_TICK_INTERVAL
+                        );
+                    }
+                    $nextIterationTimeout = $this->state->idleTickInterval;
+                }
             }
         } finally {
             $this->state->tickScheduled = false;

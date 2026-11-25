@@ -513,6 +513,33 @@ class FunctionalTest extends \React\Tests\Http\TestCase
         $this->assertSame("Hello World!\n", (string)$response->getBody());
     }
 
+    public function testIdlePollingBacksOffWhileWaitingForSlowResponse(): void
+    {
+        $browser = new Browser([CURLOPT_TIMEOUT => 10]);
+
+        // /file/sleep responds after 5 s: after a short low-latency phase the tick
+        // interval must grow so an idle transfer does not wake the loop every millisecond
+        $promise = $browser->get(self::$testServerAddress . '/file/sleep');
+
+        \React\Async\await(\React\Promise\Timer\sleep(0.2));
+
+        $stateProperty = new \ReflectionProperty(Browser::class, 'state');
+        $state = $stateProperty->getValue($browser);
+
+        $this->assertGreaterThan(0.001, $state->idleTickInterval);
+        $this->assertGreaterThan(50, $state->idleTicks);
+
+        $promise->cancel();
+        try {
+            \React\Async\await($promise);
+            $this->fail('Expected the cancelled request to reject');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('Request cancelled', $e->getMessage());
+        }
+
+        $this->assertTrue($browser->isIdle());
+    }
+
     public function reservedCurlOptions(): array
     {
         return [
