@@ -230,9 +230,14 @@ class UpstreamFunctionalBrowserTest extends \React\Tests\Http\TestCase
 
         $this->socket->pause();
         $this->socket->close();
-        foreach($this->connectionList as $conn) {
+        //snapshot first: detaching while iterating SplObjectStorage skips entries
+        $connections = [];
+        foreach ($this->connectionList as $conn) {
+            $connections[] = $conn;
+        }
+        $this->connectionList = new SplObjectStorage();
+        foreach ($connections as $conn) {
             $conn->close();
-            $this->connectionList->offsetUnset($conn);
         }
         $this->socket = null;
     }

@@ -74,6 +74,27 @@ Note that cURL decodes the body but the response headers still describe the comp
 ### Connection Reuse
 Each instance of Browser shares a Connection pool, DNS cache, SSL cache, and Cookie Jar. An example of this can be seen in [/examples/connection_pooling.php](/examples/connection_pooling.php) script.
 
+### Shared multi handle
+Requests are driven through a single shared `CurlMultiHandle` per Browser family, so with N concurrent requests each event-loop tick performs one `curl_multi_exec()` + `curl_multi_select()` poll instead of N of each. Responses are still settled individually as soon as libcurl reports each transfer complete (`curl_multi_info_read()`), so slow downloads never delay fast ones. Pass `withSharedMultiHandle(false)` to fall back to one multi handle per request:
+
+```php
+$browser = (new Browser())->withSharedMultiHandle(false);
+```
+
+The download buffer defaults to 256 KiB (`CURLOPT_BUFFERSIZE`, overridable through the constructor); this keeps the number of `curl_multi_exec()` iterations per byte low. libcurl 8.7+ shares the receive buffer between handles in a multi handle; older versions allocate it per active handle, so the buffer can cost up to 256 KiB per concurrent download there.
+
+Local benchmark (`php benchmarks/shared-multi.php`, PHP 8.5 / libcurl 8.23, 5 runs, median CPU time, default buffer):
+
+| workload | per-request | shared | change |
+| --- | --- | --- | --- |
+| 100 × 64 KiB immediate | 46.5 ms | 8.8 ms | **-81%** |
+| 40 × 8 KiB over 1 s | 378.9 ms | 160.7 ms | **-58%** |
+| 30 × delayed 300 ms | 100.5 ms | 47.8 ms | **-53%** |
+| 1 × 2 s + 35 fast/medium | 133.7 ms | 98.2 ms | -27% (fast responses settle at ~410 ms, long before the 2 s transfer ends) |
+| 8 × 8 MiB bulk | 207.6 ms | 215.6 ms | +4% (parity; wall time +1.5%) |
+
+Tests: `tests/SharedMultiHandleTest.php`.
+
 ## Connection Metadata
 ### Connection Timing
 The request/response timing is provided though the header '`ServerTiming`' in the Response object.

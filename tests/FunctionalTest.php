@@ -90,9 +90,15 @@ class FunctionalTest extends \React\Tests\Http\TestCase
     public static function tearDownAfterClass(): void
     {
         self::$server = null;
+        //snapshot first: closing a connection triggers its 'close' handler which detaches
+        //from the same SplObjectStorage, and mutating a storage while iterating can skip entries
+        $connections = [];
         foreach (self::$connections as $connection) {
-            $connection->close();
+            $connections[] = $connection;
+        }
+        foreach ($connections as $connection) {
             self::$connections->offsetUnset($connection);
+            $connection->close();
         }
         self::$socket?->close();
         self::$socket = null;

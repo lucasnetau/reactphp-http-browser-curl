@@ -44,8 +44,9 @@ final class Transaction {
      * @param resource|ThroughStream|null $file
      * @param resource $headers
      * @param BrowserState $state
+     * @param bool $ownsMulti Whether $multi is private to this transaction (closed on teardown)
      */
-    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers, private BrowserState $state) {
+    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers, private BrowserState $state, private bool $ownsMulti = true) {
         $this->start = hrtime(true);
     }
 
@@ -91,7 +92,9 @@ final class Transaction {
 
         curl_pause($this->curl, CURLPAUSE_CONT);
         curl_multi_remove_handle($this->multi, $this->curl);
-        curl_multi_close($this->multi);
+        if ($this->ownsMulti) {
+            curl_multi_close($this->multi);
+        }
         curl_setopt($this->curl, CURLOPT_XFERINFOFUNCTION, null);
         curl_setopt($this->curl, CURLOPT_WRITEFUNCTION, null);
         curl_setopt($this->curl, CURLOPT_READFUNCTION, null);

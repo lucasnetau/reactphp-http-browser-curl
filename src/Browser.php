@@ -124,6 +124,10 @@ class Browser implements ClientInterface {
         CURLOPT_HEADER => false, //We will write headers out to a separate file
         CURLOPT_CERTINFO => true,
         CURLOPT_TCP_NODELAY => true,
+        //Larger download buffer: fewer curl_multi_exec() iterations per byte. Since libcurl 8.7.0
+        //the receive buffer is shared by all handles in a shared multi handle; on older versions it
+        //is allocated per active handle, so this costs up to 256 KiB per concurrent download.
+        CURLOPT_BUFFERSIZE => 262144, //256 KiB
         CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
         //secure default: never speak non-HTTP protocols, including on redirects. Pass your own
         //CURLOPT_PROTOCOLS / CURLOPT_REDIR_PROTOCOLS to opt out (request() still only allows HTTP(S))
@@ -144,6 +148,12 @@ class Browser implements ClientInterface {
     private BrowserState $state;
 
     private bool $streaming = false;
+
+    /**
+     * Use one shared CurlMultiHandle for all in-flight requests instead of one per request.
+     * Enabled by default; see withSharedMultiHandle() to opt out.
+     */
+    private bool $sharedMulti = true;
 
     private bool $followRedirects = true;
 
@@ -198,7 +208,7 @@ class Browser implements ClientInterface {
         }
 
         $headerOption = $options[CURLOPT_HEADER] ?? false;
-        if ($headerOption !== false && $headerOption !== 0 && $headerOption !== null) {
+        if ($headerOption !== false && $headerOption !== 0) {
             throw new \InvalidArgumentException('CURLOPT_HEADER must be false: response headers are parsed by the transport');
         }
 
@@ -408,6 +418,24 @@ class Browser implements ClientInterface {
 
         return $this->withOptions(array(
             'maximumSize' => $maximumSize
+        ));
+    }
+
+    /**
+     * Toggle the shared CurlMultiHandle used for all in-flight requests (enabled by default).
+     *
+     * With N concurrent requests one multi handle performs one curl_multi_exec() +
+     * curl_multi_select() poll per event-loop tick instead of N of each. Responses are still
+     * settled individually as soon as libcurl reports each transfer complete via
+     * curl_multi_info_read(), so slow transfers never delay fast ones. Clones share the
+     * multi handle with the Browser family they derive from.
+     *
+     * Pass false to fall back to one CurlMultiHandle per request.
+     */
+    public function withSharedMultiHandle(bool $enabled = true): self
+    {
+        return $this->withOptions(array(
+            'sharedMulti' => $enabled,
         ));
     }
 
@@ -665,11 +693,18 @@ class Browser implements ClientInterface {
 
     private function initMulti(CurlHandle $curl) : CurlMultiHandle
     {
-        $multi = curl_multi_init();
+        if ($this->sharedMulti) {
+            $multi = $this->state->sharedMulti();
+        } else {
+            $multi = curl_multi_init();
+        }
+
         $return = curl_multi_add_handle($multi, $curl);
 
         if ($return !== 0) {
-            curl_multi_close($multi);
+            if (!$this->sharedMulti) {
+                curl_multi_close($multi);
+            }
             throw new \RuntimeException('Unable to add curl to multi handle, Error:' . $return . ", Msg: " . curl_multi_strerror($return));
         }
 
@@ -687,15 +722,15 @@ class Browser implements ClientInterface {
         //Collect raw response headers (all hops) through a callback so their total size can be
         //bounded: a malicious server could otherwise exhaust memory with an endless header block.
         $headerBytes = 0;
-        curl_setopt($curl, CURLOPT_HEADERFUNCTION, function($curl, $data) use ($headerHandle, $multi, &$headerBytes) {
+        curl_setopt($curl, CURLOPT_HEADERFUNCTION, function($curl, $data) use ($headerHandle, &$headerBytes) {
             $length = strlen($data);
             $headerBytes += $length;
 
             if ($headerBytes > self::MAX_RESPONSE_HEADER_SIZE) {
                 //record the failure and abort the transfer, but do not touch the transaction's
                 //cURL handles here: this runs inside a libcurl callback (see curlTick())
-                if ($this->state->inProgress->offsetExists($multi) && $this->state->inProgress[$multi]->error === null) {
-                    $this->state->inProgress[$multi]->error = new \OverflowException(
+                if ($this->state->inProgress->offsetExists($curl) && $this->state->inProgress[$curl]->error === null) {
+                    $this->state->inProgress[$curl]->error = new \OverflowException(
                         'Response headers size of ' . $headerBytes . ' bytes exceeds maximum of ' . self::MAX_RESPONSE_HEADER_SIZE . ' bytes',
                         \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
                     );
@@ -710,20 +745,20 @@ class Browser implements ClientInterface {
         if ($this->streaming) {
             $responseBody = new ThroughStream();
             $pauseRequested = false;
-            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi, &$pauseRequested) {
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, &$pauseRequested) {
                 static $first = true;
 
                 //a promise handler running inside this callback may have cancelled the
                 //request (cancelAll()): the transaction is gone or closing and the
                 //transfer must be aborted instead of writing more data
-                if (!$this->state->inProgress->offsetExists($multi) || $this->state->inProgress[$multi]->isClosed()) {
+                if (!$this->state->inProgress->offsetExists($curl) || $this->state->inProgress[$curl]->isClosed()) {
                     return 0;
                 }
-                $transaction = $this->state->inProgress[$multi];
+                $transaction = $this->state->inProgress[$curl];
 
                 if ($first) {
                     try {
-                        $res = $this->resolveResponse($multi, $curl);
+                        $res = $this->resolveResponse($transaction);
                         $transaction->deferred->resolve($res);
                     } catch (Throwable $ex) {
                         if (isset($transaction->deferred)) {
@@ -765,7 +800,7 @@ class Browser implements ClientInterface {
             if ($responseBody === false) {
                 throw new \RuntimeException('Unable to create temporary file for response body');
             }
-            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody, $multi) {
+            curl_setopt($curl, CURLOPT_WRITEFUNCTION, function($curl, $data) use ($responseBody) {
                 static $xfer = 0;
                 $len = strlen($data);
                 $xfer += $len;
@@ -775,8 +810,8 @@ class Browser implements ClientInterface {
                     // from inProgress or settle the promise here: this runs inside a libcurl
                     // callback, where removing/closing cURL handles is not allowed. curlTick()
                     // rejects the promise and closes the handles once curl_multi_exec() returns.
-                    if ($this->state->inProgress->offsetExists($multi) && $this->state->inProgress[$multi]->error === null) {
-                        $this->state->inProgress[$multi]->error = new \OverflowException(
+                    if ($this->state->inProgress->offsetExists($curl) && $this->state->inProgress[$curl]->error === null) {
+                        $this->state->inProgress[$curl]->error = new \OverflowException(
                             'Response body size of ' . $xfer . ' bytes exceeds maximum of ' . $this->maximumSize . ' bytes',
                             \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
                         );
@@ -791,13 +826,13 @@ class Browser implements ClientInterface {
 
         /** Monitor if we are in upload or download state, used in calculating suggested multi timeouts */
         curl_setopt($curl, CURLOPT_NOPROGRESS, 0);
-        curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) use ($multi) {
-            if (!$this->state->inProgress->offsetExists($multi)) {
+        curl_setopt($curl, CURLOPT_XFERINFOFUNCTION, function($curl, $dl_total, $dl_xfer, $ul_total, $ul_xfer) {
+            if (!$this->state->inProgress->offsetExists($curl)) {
                 return 0;
             }
 
             $status = Transaction::STATUS_CONNECTING;
-            $oldStatus = $this->state->inProgress[$multi]->status;
+            $oldStatus = $this->state->inProgress[$curl]->status;
             if ($dl_xfer > 0 || $dl_total > 0) {
                 if ($dl_xfer >= $dl_total) {
                     $status = Transaction::STATUS_DONE;
@@ -808,7 +843,7 @@ class Browser implements ClientInterface {
                 $status = Transaction::STATUS_UPLOADING;
             }
             if ($status !== $oldStatus) {
-                $this->state->inProgress[$multi]->status = $status;
+                $this->state->inProgress[$curl]->status = $status;
                 if ($oldStatus === Transaction::STATUS_UPLOADING) {
                     curl_pause($curl, CURLPAUSE_CONT); //Ensure we are not paused
                 }
@@ -816,10 +851,10 @@ class Browser implements ClientInterface {
             return 0; //Keep going
         });
 
-        $deferred = new Deferred(function() use ($multi, &$deferred) {
-            if ($this->state->inProgress->offsetExists($multi)) {
-                $transaction = $this->state->inProgress[$multi];
-                unset($this->state->inProgress[$multi]);
+        $deferred = new Deferred(function() use ($curl, &$deferred) {
+            if ($this->state->inProgress->offsetExists($curl)) {
+                $transaction = $this->state->inProgress[$curl];
+                unset($this->state->inProgress[$curl]);
             }
             $deferred->reject(new \RuntimeException('Request cancelled'));
             if (isset($transaction)) {
@@ -831,7 +866,7 @@ class Browser implements ClientInterface {
             $deferred->reject($error);
         });
 
-        $this->state->inProgress[$multi] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle, $this->state);
+        $this->state->inProgress[$curl] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle, $this->state, !$this->sharedMulti);
 
         $this->execCurlMulti($multi); //Get it started
 
@@ -908,76 +943,90 @@ class Browser implements ClientInterface {
 
         $nextIterationTimeout = 0.001; //poll at most every 1ms while a transfer is in flight
         $drainBudget = 256; //yield to the event loop after at most 4 MiB so timers/other requests stay responsive
+        $stillRunning = false;
+        $uploading = false;
         try {
-            foreach($this->state->inProgress as $mh) {
-                $transaction = $this->state->inProgress[$mh];
+            //Collect every distinct multi handle currently in use: one per request in the
+            //default mode, or a single shared handle with withSharedMultiHandle().
+            $multis = [];
+            foreach ($this->state->inProgress as $handle) {
+                $transaction = $this->state->inProgress[$handle];
                 if ($transaction->isClosed()) {
-                    unset($this->state->inProgress[$mh]);
+                    unset($this->state->inProgress[$handle]);
                     continue;
                 }
-                $still_running = $this->execCurlMulti($mh);
+                $multis[\spl_object_id($transaction->multi)] = $transaction->multi;
+                if ($transaction->status === Transaction::STATUS_UPLOADING) {
+                    $uploading = true;
+                }
+            }
+
+            foreach ($multis as $mh) {
+                //Snapshot the transactions attached to this multi before executing: promise
+                //handlers may start new requests on the same (shared) handle during the tick,
+                //and those must not be mistaken for stuck transfers by the safety net below.
+                $attached = [];
+                foreach ($this->state->inProgress as $handle) {
+                    $attachedTransaction = $this->state->inProgress[$handle];
+                    if (!$attachedTransaction->isClosed() && $attachedTransaction->multi === $mh) {
+                        $attached[\spl_object_id($handle)] = $handle;
+                    }
+                }
+
+                $running = $this->execCurlMulti($mh);
 
                 //Drain all immediately available data before returning to the event loop:
                 //each write callback gets at most 16 KiB, and a full loop iteration costs
                 //far more than the read it delivers.
-                while ($still_running && $drainBudget-- > 0 && curl_multi_select($mh, 0) > 0) {
+                while ($running && $drainBudget-- > 0 && curl_multi_select($mh, 0) > 0) {
                     $nextIterationTimeout = 0;
-                    $still_running = $this->execCurlMulti($mh);
+                    $running = $this->execCurlMulti($mh);
+                }
+                if ($running) {
+                    $stillRunning = true;
                 }
 
-                //A promise handler may have cancelled this request while cURL was delivering
-                //data from inside curl_multi_exec(); its transaction must not be used again here.
-                //PHPStan cannot see this re-entrant state change.
-                if (!$this->state->inProgress->offsetExists($mh) || $transaction->isClosed()) { // @phpstan-ignore booleanOr.rightAlwaysFalse
-                    unset($this->state->inProgress[$mh]);
-                    continue;
-                }
-
-                if ($still_running) {
-                    if ($nextIterationTimeout !== 0 && $this->state->inProgress[$mh]->status === Transaction::STATUS_UPLOADING) {
-                        $nextIterationTimeout = 0.0001;
+                //Settle every completed transfer as soon as cURL reports it. This runs even
+                //while other transfers on the same multi handle are still in flight, so a
+                //slow download never delays a fast one (no head-of-line blocking).
+                while (($info = curl_multi_info_read($mh)) !== false) {
+                    if (!isset($info['handle']) || !$info['handle'] instanceof CurlHandle) {
+                        continue;
                     }
-                    continue;
-                }
-
-                $deferred = $transaction->deferred;
-                $info = curl_multi_info_read($mh);
-                if ($info === false) {
-                    unset($this->state->inProgress[$mh]);
-                    $deferred->reject($transaction->error ?? new \RuntimeException("curl_multi_info_read returned error on completion"));
-                    $transaction->close();
-                    continue;
-                }
-                $curl = $transaction->curl;
-
-                if ($transaction->file instanceof ThroughStream) {
-                    $transaction->file->end();
-                }
-
-                if ($transaction->error !== null) {
-                    //a cURL callback aborted the transfer; reject only now, outside the callback
-                    unset($this->state->inProgress[$mh]);
-                    $deferred->reject($transaction->error);
-                } elseif ($info['result'] === CURLE_OK) {
-                    try {
-                        $res = $this->resolveResponse($mh, $curl);
-                        unset($this->state->inProgress[$mh]);
-                        $deferred->resolve($res);
-                    } catch (Throwable $ex) {
-                        $deferred->reject($ex);
+                    $completed = $info['handle'];
+                    if (!$this->state->inProgress->offsetExists($completed)) {
+                        continue; //already cancelled/closed
                     }
-                } else {
-                    unset($this->state->inProgress[$mh]);
-                    if ($info['result'] === CURLE_OPERATION_TIMEDOUT) {
-                        $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
-                    } elseif ($info['result'] === CURLE_ABORTED_BY_CALLBACK && $this->ssrfProtection) {
-                        //the pre-request callback refused a non-public destination before sending the request
-                        $deferred->reject(new \RuntimeException('Request to blocked address ' . (string)curl_getinfo($curl, CURLINFO_PRIMARY_IP) . ' refused', CURLE_ABORTED_BY_CALLBACK));
-                    } else {
-                        $deferred->reject(new \RuntimeException(curl_strerror($info['result']) ?? ('cURL error ' . $info['result']), $info['result']));
+                    $transaction = $this->state->inProgress[$completed];
+                    if ($transaction->isClosed()) {
+                        unset($this->state->inProgress[$completed]);
+                        continue;
+                    }
+                    $result = $info['result'] ?? CURLE_OK;
+                    $this->completeTransaction($transaction, is_int($result) ? $result : CURLE_OK);
+                }
+
+                if (!$running) {
+                    //safety net: a transfer that was attached before this exec stopped running
+                    //without a completion message
+                    foreach ($attached as $handle) {
+                        if (!$this->state->inProgress->offsetExists($handle)) {
+                            continue;
+                        }
+                        $stuck = $this->state->inProgress[$handle];
+                        if ($stuck->isClosed()) {
+                            unset($this->state->inProgress[$handle]);
+                            continue;
+                        }
+                        unset($this->state->inProgress[$handle]);
+                        $stuck->deferred->reject($stuck->error ?? new \RuntimeException("curl_multi_info_read returned error on completion"));
+                        $stuck->close();
                     }
                 }
-                $transaction->close();
+            }
+
+            if ($stillRunning && $nextIterationTimeout !== 0 && $uploading) {
+                $nextIterationTimeout = 0.0001;
             }
         } finally {
             $this->state->tickScheduled = false;
@@ -988,13 +1037,54 @@ class Browser implements ClientInterface {
     }
 
     /**
-     * @param CurlMultiHandle $mh
-     * @param CurlHandle $curl
+     * Settle a transaction whose transfer has completed, then release its resources.
+     *
+     * @param Transaction $transaction
+     * @param int $result CURLcode reported by curl_multi_info_read()
+     */
+    private function completeTransaction(Transaction $transaction, int $result): void
+    {
+        $curl = $transaction->curl;
+        $deferred = $transaction->deferred;
+
+        if ($transaction->file instanceof ThroughStream) {
+            $transaction->file->end();
+        }
+
+        if ($transaction->error !== null) {
+            //a cURL callback aborted the transfer; reject only now, outside the callback
+            unset($this->state->inProgress[$curl]);
+            $deferred->reject($transaction->error);
+        } elseif ($result === CURLE_OK) {
+            try {
+                $res = $this->resolveResponse($transaction);
+                unset($this->state->inProgress[$curl]);
+                $deferred->resolve($res);
+            } catch (Throwable $ex) {
+                unset($this->state->inProgress[$curl]);
+                $deferred->reject($ex);
+            }
+        } else {
+            unset($this->state->inProgress[$curl]);
+            if ($result === CURLE_OPERATION_TIMEDOUT) {
+                $deferred->reject(new \RuntimeException('Request timed out after ' . round((hrtime(true) - $transaction->start)/1e+9, 1) . ' seconds'), CURLE_OPERATION_TIMEDOUT);
+            } elseif ($result === CURLE_ABORTED_BY_CALLBACK && $this->ssrfProtection) {
+                //the pre-request callback refused a non-public destination before sending the request
+                $deferred->reject(new \RuntimeException('Request to blocked address ' . (string)curl_getinfo($curl, CURLINFO_PRIMARY_IP) . ' refused', CURLE_ABORTED_BY_CALLBACK));
+            } else {
+                $deferred->reject(new \RuntimeException(curl_strerror($result) ?? ('cURL error ' . $result), $result));
+            }
+        }
+        $transaction->close();
+    }
+
+    /**
+     * @param Transaction $transaction
      * @return ResponseInterface
      */
-    private function resolveResponse(CurlMultiHandle $mh, CurlHandle $curl): ResponseInterface
+    private function resolveResponse(Transaction $transaction): ResponseInterface
     {
-        $transaction = $this->state->inProgress[$mh];
+        $curl = $transaction->curl;
         $responseBody = $transaction->file;
         if (is_resource($responseBody)) {
             stream_set_blocking($responseBody, false);
@@ -1005,7 +1095,11 @@ class Browser implements ClientInterface {
             //otherwise responses read after the resolving tick (e.g. from a Promise\all()
             //handler) would operate on a closed stream.
             $transaction->file = null;
-            $responseBody = $stream;
+            $body = $stream;
+        } elseif ($responseBody === null) {
+            throw new \RuntimeException('Unable to build response: body stream already released');
+        } else {
+            $body = $responseBody;
         }
 
         /** @var resource $responseHeaderHandle */
@@ -1013,7 +1107,7 @@ class Browser implements ClientInterface {
         rewind($responseHeaderHandle);
         $headers = stream_get_contents($responseHeaderHandle);
         //@TODO implement ReactPHP Browser withRejectErrorResponse support
-        return $this->constructResponseFromCurl($curl, $headers, $responseBody);
+        return $this->constructResponseFromCurl($curl, $headers, $body);
     }
 
     /**
@@ -1143,9 +1237,9 @@ class Browser implements ClientInterface {
         }
         $this->state->tickScheduled = false;
 
-        foreach($this->state->inProgress as $mh) {
-            $transaction = $this->state->inProgress[$mh];
-            unset($this->state->inProgress[$mh]);
+        foreach($this->state->inProgress as $handle) {
+            $transaction = $this->state->inProgress[$handle];
+            unset($this->state->inProgress[$handle]);
             $transaction->close();
         }
     }

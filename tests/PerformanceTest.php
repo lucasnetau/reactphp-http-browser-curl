@@ -207,9 +207,14 @@ class PerformanceTest extends \React\Tests\Http\TestCase
     public static function tearDownAfterClass(): void
     {
         self::$http = null;
+        //snapshot first: detaching while iterating SplObjectStorage skips entries
+        $connections = [];
         foreach (self::$connections as $connection) {
+            $connections[] = $connection;
+        }
+        self::$connections = new SplObjectStorage();
+        foreach ($connections as $connection) {
             $connection->close();
-            self::$connections->offsetUnset($connection);
         }
         self::$socket?->close();
         self::$socket = null;
