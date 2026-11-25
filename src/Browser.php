@@ -128,7 +128,9 @@ class Browser implements ClientInterface {
         //the receive buffer is shared by all handles in a shared multi handle; on older versions it
         //is allocated per active handle, so this costs up to 256 KiB per concurrent download.
         CURLOPT_BUFFERSIZE => 262144, //256 KiB
-        CURLOPT_UPLOAD_BUFFERSIZE => 10485764*2, //Increase the upload buffer
+        //libcurl caps the upload buffer at CURL_MAX_UPLOAD_SIZE (2 MiB) and treats the option
+        //as a request, not an order; set the maximum explicitly instead of relying on clamping
+        CURLOPT_UPLOAD_BUFFERSIZE => 2097152, //2 MiB
         //secure default: never speak non-HTTP protocols, including on redirects. Pass your own
         //CURLOPT_PROTOCOLS / CURLOPT_REDIR_PROTOCOLS to opt out (request() still only allows HTTP(S))
         CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
