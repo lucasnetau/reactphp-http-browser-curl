@@ -32,6 +32,9 @@ class UploadBodyStream extends EventEmitter {
 
     private string $buffer = '';
 
+    /** Offset of the first unread byte in $buffer */
+    private int $bufferOffset = 0;
+
     private bool $ended = false;
 
     private bool $paused = false;
@@ -44,7 +47,7 @@ class UploadBodyStream extends EventEmitter {
         $input->on('data', function ($data) {
             $this->buffer .= $data;
 
-            if (!$this->paused && strlen($this->buffer) >= self::MAX_BUFFERED_BYTES) {
+            if (!$this->paused && $this->pendingBytes() >= self::MAX_BUFFERED_BYTES) {
                 $this->paused = true;
                 $this->input->pause();
             }
@@ -86,7 +89,8 @@ class UploadBodyStream extends EventEmitter {
             return self::READFUNC_ABORT;
         }
 
-        if ($this->buffer === '') {
+        $pending = $this->pendingBytes();
+        if ($pending === 0) {
             if ($this->ended) {
                 return ''; //EOF
             }
@@ -94,14 +98,29 @@ class UploadBodyStream extends EventEmitter {
             return CURL_READFUNC_PAUSE;
         }
 
-        $data = substr($this->buffer, 0, $length);
-        $this->buffer = substr($this->buffer, strlen($data));
+        $data = substr($this->buffer, $this->bufferOffset, $length);
+        $this->bufferOffset += strlen($data);
 
-        if ($this->paused && strlen($this->buffer) < self::MAX_BUFFERED_BYTES / 2) {
+        //Compact the consumed prefix once it makes up at least half the buffer. Previously
+        //every read rebuilt the entire remaining buffer (O(n^2) for chunked reads); now
+        //each byte is copied at most a constant number of times.
+        $pending = $this->pendingBytes();
+        if ($this->bufferOffset >= $pending) {
+            $this->buffer = substr($this->buffer, $this->bufferOffset);
+            $this->bufferOffset = 0;
+            $pending = strlen($this->buffer);
+        }
+
+        if ($this->paused && $pending < self::MAX_BUFFERED_BYTES / 2) {
             $this->paused = false;
             $this->input->resume();
         }
 
         return $data;
+    }
+
+    /** Bytes buffered but not yet handed to cURL */
+    private function pendingBytes(): int {
+        return strlen($this->buffer) - $this->bufferOffset;
     }
 }
