@@ -29,7 +29,6 @@ class TransactionTest extends TestCase
             $curl,
             $deferred,
             fopen('php://memory', 'w+'),
-            fopen('php://memory', 'w+'),
             new BrowserState()
         );
 
@@ -56,7 +55,6 @@ class TransactionTest extends TestCase
             $multi,
             $curl,
             $deferred,
-            fopen('php://memory', 'w+'),
             fopen('php://memory', 'w+'),
             $state
         );

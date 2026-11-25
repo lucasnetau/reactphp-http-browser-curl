@@ -11,6 +11,7 @@ use function curl_pause;
 use function curl_setopt;
 use function fclose;
 use function is_resource;
+use function strlen;
 
 final class Transaction {
 
@@ -21,7 +22,13 @@ final class Transaction {
 
     const STATUS_DONE = 'done';
 
+    /** Largest total size of response headers (all redirect hops and 1xx responses included) */
+    private const MAX_RESPONSE_HEADER_SIZE = 262144; //256 KiB
+
     public string $status = self::STATUS_CONNECTING;
+
+    /** Raw response headers (all hops), bounded by MAX_RESPONSE_HEADER_SIZE */
+    public string $headers = '';
 
     private bool $closed = false;
 
@@ -41,13 +48,36 @@ final class Transaction {
      * @param \CurlMultiHandle $multi
      * @param CurlHandle $curl
      * @param Deferred $deferred
-     * @param resource|ThroughStream|null $file
-     * @param resource $headers
+     * @param ThroughStream|resource|null $file
      * @param BrowserState $state
      * @param bool $ownsMulti Whether $multi is private to this transaction (closed on teardown)
      */
-    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, public $headers, private BrowserState $state, private bool $ownsMulti = true) {
+    public function __construct(public \CurlMultiHandle $multi, public CurlHandle $curl, public Deferred $deferred, public $file, private BrowserState $state, private bool $ownsMulti = true) {
         $this->start = hrtime(true);
+
+        //Collect raw response headers (all hops) in a bounded string: a malicious server
+        //cannot exhaust memory with an endless header block. Holding the text directly
+        //avoids a php://memory stream per request.
+        $headerBytes = 0;
+        curl_setopt($curl, CURLOPT_HEADERFUNCTION, function($curl, $data) use (&$headerBytes) {
+            $length = strlen($data);
+            $headerBytes += $length;
+
+            if ($headerBytes > self::MAX_RESPONSE_HEADER_SIZE) {
+                //record the failure and abort the transfer, but do not remove or close the
+                //cURL handles here: this runs inside a libcurl callback (see curlTick())
+                if (!$this->closed && $this->error === null) {
+                    $this->error = new \OverflowException(
+                        'Response headers size of ' . $headerBytes . ' bytes exceeds maximum of ' . self::MAX_RESPONSE_HEADER_SIZE . ' bytes',
+                        \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
+                    );
+                }
+                return 0;
+            }
+
+            $this->headers .= $data;
+            return $length;
+        });
     }
 
     public function close() : void {
@@ -98,9 +128,9 @@ final class Transaction {
         curl_setopt($this->curl, CURLOPT_XFERINFOFUNCTION, null);
         curl_setopt($this->curl, CURLOPT_WRITEFUNCTION, null);
         curl_setopt($this->curl, CURLOPT_READFUNCTION, null);
+        curl_setopt($this->curl, CURLOPT_HEADERFUNCTION, null);
         unset($this->multi);
         unset($this->curl);
-        fclose($this->headers);
         if (is_resource($this->file)) {
             fclose($this->file);
         }

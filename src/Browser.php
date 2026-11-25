@@ -64,7 +64,6 @@ use function property_exists;
 use function rewind;
 use function round;
 use function str_contains;
-use function stream_get_contents;
 use function stream_set_blocking;
 use function strlen;
 use function strtolower;
@@ -74,9 +73,6 @@ use function trim;
 class Browser implements ClientInterface {
     /** Largest response body prefix kept in memory before spilling to a temporary file */
     private const MAX_BUFFERED_MEMORY = 16777216; //16 MiB
-
-    /** Largest total size of response headers (all redirect hops and 1xx responses included) */
-    private const MAX_RESPONSE_HEADER_SIZE = 262144; //256 KiB
 
     /** Poll interval while transfers are in flight and socket data is available/expected */
     private const ACTIVE_TICK_INTERVAL = 0.001; //1 ms
@@ -741,35 +737,7 @@ class Browser implements ClientInterface {
     }
 
     protected function execRequest($curl, ?UploadBodyStream $upload = null) : PromiseInterface {
-        $headerHandle = fopen('php://memory', 'w+');
-        if ($headerHandle === false) {
-            throw new \RuntimeException('Unable to create temporary file for response headers');
-        }
-
         $multi = $this->initMulti($curl);
-
-        //Collect raw response headers (all hops) through a callback so their total size can be
-        //bounded: a malicious server could otherwise exhaust memory with an endless header block.
-        $headerBytes = 0;
-        curl_setopt($curl, CURLOPT_HEADERFUNCTION, function($curl, $data) use ($headerHandle, &$headerBytes) {
-            $length = strlen($data);
-            $headerBytes += $length;
-
-            if ($headerBytes > self::MAX_RESPONSE_HEADER_SIZE) {
-                //record the failure and abort the transfer, but do not touch the transaction's
-                //cURL handles here: this runs inside a libcurl callback (see curlTick())
-                if ($this->state->inProgress->offsetExists($curl) && $this->state->inProgress[$curl]->error === null) {
-                    $this->state->inProgress[$curl]->error = new \OverflowException(
-                        'Response headers size of ' . $headerBytes . ' bytes exceeds maximum of ' . self::MAX_RESPONSE_HEADER_SIZE . ' bytes',
-                        \defined('SOCKET_EMSGSIZE') ? \SOCKET_EMSGSIZE : 90
-                    );
-                }
-                return 0;
-            }
-
-            $written = fwrite($headerHandle, $data);
-            return $written === false ? 0 : $written;
-        });
 
         if ($this->streaming) {
             $responseBody = new ThroughStream();
@@ -898,7 +866,8 @@ class Browser implements ClientInterface {
             $deferred->reject($error);
         });
 
-        $this->state->inProgress[$curl] = new Transaction($multi, $curl, $deferred, $responseBody, $headerHandle, $this->state, !$this->sharedMulti);
+        $transaction = new Transaction($multi, $curl, $deferred, $responseBody, $this->state, !$this->sharedMulti);
+        $this->state->inProgress[$curl] = $transaction;
 
         $this->execCurlMulti($multi); //Get it started
 
@@ -1179,12 +1148,8 @@ class Browser implements ClientInterface {
             $body = $responseBody;
         }
 
-        /** @var resource $responseHeaderHandle */
-        $responseHeaderHandle = $transaction->headers;
-        rewind($responseHeaderHandle);
-        $headers = stream_get_contents($responseHeaderHandle);
         //@TODO implement ReactPHP Browser withRejectErrorResponse support
-        return $this->constructResponseFromCurl($curl, $headers, $body);
+        return $this->constructResponseFromCurl($curl, $transaction->headers, $body);
     }
 
     /**
