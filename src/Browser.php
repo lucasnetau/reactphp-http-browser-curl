@@ -249,18 +249,31 @@ class Browser implements ClientInterface {
         return $this->request('DELETE',$url,$headers, $body);
     }
 
+    /**
+     * Cache of declared property defaults, keyed by "<class>::<property>".
+     *
+     * @var array<string, mixed>
+     */
+    private static array $optionDefaults = [];
+
     protected function withOptions(array $options = []) : self {
         $browser = clone $this;
         foreach ($options as $name => $value) {
-            if (property_exists($this, $name)) {
-                // restore default value if null is given
-                if ($value === null) {
-                    $default = new self();
-                    $value = $default->$name;
-                }
-
-                $browser->$name = $value;
+            if (!property_exists($this, $name)) {
+                continue;
             }
+
+            // restore the property's declared default when null is given
+            if ($value === null) {
+                $key = $this::class . '::' . $name;
+                if (!array_key_exists($key, self::$optionDefaults)) {
+                    $property = new \ReflectionProperty($this, $name);
+                    self::$optionDefaults[$key] = $property->hasDefaultValue() ? $property->getDefaultValue() : null;
+                }
+                $value = self::$optionDefaults[$key];
+            }
+
+            $browser->$name = $value;
         }
         return $browser;
     }
