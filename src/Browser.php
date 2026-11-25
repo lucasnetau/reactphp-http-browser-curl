@@ -1140,13 +1140,70 @@ class Browser implements ClientInterface {
     }
 
     /**
+     * Read only the CURLINFO_* values consumed when building the response.
+     *
+     * A full curl_getinfo() array materialises every field (measured ~30% slower) and
+     * several values used below are not part of it (num_connects) or only available in
+     * another form (appconnect_time_us). The casts mirror the type libcurl documents for
+     * each option.
+     *
+     * @return array{
+     *   redirect_count: int,
+     *   appconnect_time: float,
+     *   certinfo: array,
+     *   request_size: int,
+     *   size_upload: float,
+     *   header_size: int,
+     *   size_download: float,
+     *   url: string,
+     *   namelookup_time: float,
+     *   connect_time: float,
+     *   pretransfer_time: float,
+     *   redirect_time: float,
+     *   starttransfer_time: float,
+     *   total_time: float,
+     *   num_connects: int,
+     *   speed_upload: int,
+     *   speed_download: int,
+     *   response_code: int,
+     *   effective_method: string,
+     *   http_version: int,
+     * }
+     */
+    private static function curlInfo(CurlHandle $curl): array {
+        return [
+            'redirect_count' => (int)curl_getinfo($curl, CURLINFO_REDIRECT_COUNT),
+            'appconnect_time' => (float)curl_getinfo($curl, CURLINFO_APPCONNECT_TIME),
+            'certinfo' => (array)curl_getinfo($curl, CURLINFO_CERTINFO),
+            'request_size' => (int)curl_getinfo($curl, CURLINFO_REQUEST_SIZE),
+            'size_upload' => (float)curl_getinfo($curl, CURLINFO_SIZE_UPLOAD),
+            'header_size' => (int)curl_getinfo($curl, CURLINFO_HEADER_SIZE),
+            'size_download' => (float)curl_getinfo($curl, CURLINFO_SIZE_DOWNLOAD),
+            'url' => (string)curl_getinfo($curl, CURLINFO_EFFECTIVE_URL),
+            'namelookup_time' => (float)curl_getinfo($curl, CURLINFO_NAMELOOKUP_TIME),
+            'connect_time' => (float)curl_getinfo($curl, CURLINFO_CONNECT_TIME),
+            'pretransfer_time' => (float)curl_getinfo($curl, CURLINFO_PRETRANSFER_TIME),
+            'redirect_time' => (float)curl_getinfo($curl, CURLINFO_REDIRECT_TIME),
+            'starttransfer_time' => (float)curl_getinfo($curl, CURLINFO_STARTTRANSFER_TIME),
+            'total_time' => (float)curl_getinfo($curl, CURLINFO_TOTAL_TIME),
+            'num_connects' => (int)curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
+            'speed_upload' => (int)curl_getinfo($curl, CURLINFO_SPEED_UPLOAD_T),
+            'speed_download' => (int)curl_getinfo($curl, CURLINFO_SPEED_DOWNLOAD_T),
+            'response_code' => (int)curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
+            'effective_method' => (string)curl_getinfo($curl, CURLINFO_EFFECTIVE_METHOD),
+            'http_version' => (int)curl_getinfo($curl, CURLINFO_HTTP_VERSION),
+        ];
+    }
+
+    /**
      * @param CurlHandle $curl
      * @param string $rawHeaders
      * @param ThroughStream|StreamInterface $body
      * @return ResponseInterface
      */
     private function constructResponseFromCurl(CurlHandle $curl, string $rawHeaders, ThroughStream|StreamInterface $body) : ResponseInterface {
-        $redirectCount = curl_getinfo($curl, CURLINFO_REDIRECT_COUNT);
+        $info = self::curlInfo($curl);
+        $redirectCount = $info['redirect_count'];
         $headers = [];
         $lines = preg_split('/(\\r?\\n)/', trim($rawHeaders), -1);
         foreach($lines as $headerLine) {
@@ -1164,15 +1221,18 @@ class Browser implements ClientInterface {
             $headers[$key][] = $value;
         }
 
-        $info = curl_getinfo($curl);
-        $info['appconnect_time'] = curl_getinfo($curl,CURLINFO_APPCONNECT_TIME); //appconnect_time is not in the curl_getinfo default result list
-        $timing = [];
-        foreach(["namelookup_time", "connect_time", "appconnect_time", "pretransfer_time", "redirect_time", "starttransfer_time", "total_time",] as $timingKey) {
-            $timing[] = "$timingKey;dur=". $info[$timingKey];
-        }
+        $timing = [
+            'namelookup_time;dur=' . $info['namelookup_time'],
+            'connect_time;dur=' . $info['connect_time'],
+            'appconnect_time;dur=' . $info['appconnect_time'],
+            'pretransfer_time;dur=' . $info['pretransfer_time'],
+            'redirect_time;dur=' . $info['redirect_time'],
+            'starttransfer_time;dur=' . $info['starttransfer_time'],
+            'total_time;dur=' . $info['total_time'],
+        ];
         $headers['ServerTiming'] = $timing;
 
-        $certs = $info['certinfo'] ?? [];
+        $certs = $info['certinfo'];
         if (count($certs) > 0) {
             $headers['X-Certificate'] = $certs[0]['Cert'];
         }
@@ -1182,16 +1242,16 @@ class Browser implements ClientInterface {
 
         $headers['X-Connection'] = [
             "effective_url=" . $info['url'],
-            "connection;count=" . curl_getinfo($curl, CURLINFO_NUM_CONNECTS),
+            "connection;count=" . $info['num_connects'],
             "redirect;count=" . $redirectCount,
-            "upload;size=$uploadSize;speed=" . curl_getinfo($curl, CURLINFO_SPEED_UPLOAD_T),
-            "download;size=$downloadSize;speed=" . curl_getinfo($curl, CURLINFO_SPEED_DOWNLOAD_T),
+            "upload;size=$uploadSize;speed=" . $info['speed_upload'],
+            "download;size=$downloadSize;speed=" . $info['speed_download'],
         ];
 
         // determine length of response body
         $length = null;
-        $code = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
-        if (curl_getinfo($curl, CURLINFO_EFFECTIVE_METHOD) === 'HEAD' || ($code >= 100 && $code < 200) || $code == StatusCodeInterface::STATUS_NO_CONTENT || $code == StatusCodeInterface::STATUS_NOT_MODIFIED) {
+        $code = $info['response_code'];
+        if ($info['effective_method'] === 'HEAD' || ($code >= 100 && $code < 200) || $code == StatusCodeInterface::STATUS_NO_CONTENT || $code == StatusCodeInterface::STATUS_NOT_MODIFIED) {
             $length = 0;
         } else {
             foreach ($headers as $key => $values) {
@@ -1206,8 +1266,7 @@ class Browser implements ClientInterface {
             $body = new HttpBodyStream($body, $length);
         }
 
-        $curlHttpVersion = curl_getinfo($curl, CURLINFO_HTTP_VERSION);
-        $httpVersion = self::httpVersionName((int)$curlHttpVersion);
+        $httpVersion = self::httpVersionName($info['http_version']);
 
         $response = new \React\Http\Message\Response(
             $code,

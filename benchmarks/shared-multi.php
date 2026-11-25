@@ -30,6 +30,8 @@ error_reporting(E_ALL & ~E_DEPRECATED);
 function workload(string $name): array
 {
     return match ($name) {
+        // many tiny responses: per-response construction overhead dominates
+        'tiny' => array_fill(0, 1000, ['/fast?bytes=16', 16]),
         // many small, immediate responses: per-tick overhead at high concurrency
         'fast' => array_fill(0, 100, ['/fast?bytes=65536', 65536]),
         // many tiny, long-lived transfers: almost pure polling overhead (N execs per tick)
@@ -176,7 +178,7 @@ if ($portLine === false || !str_starts_with($portLine, 'PORT=')) {
 $port = (int)substr(trim($portLine), 5);
 
 $modes = $modeFilter !== null ? [$modeFilter] : ['per-request', 'shared'];
-$workloads = $workloadFilter !== null ? [$workloadFilter] : ['fast', 'slow', 'mixed', 'large', 'delayed'];
+$workloads = $workloadFilter !== null ? [$workloadFilter] : ['tiny', 'fast', 'slow', 'mixed', 'large', 'delayed'];
 
 printf("PHP %s, libcurl %s, %d reps, server port %d\n\n", PHP_VERSION, curl_version()['version'], $reps, $port);
 printf(

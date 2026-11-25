@@ -91,7 +91,7 @@ Local benchmark (`php benchmarks/shared-multi.php`, PHP 8.5 / libcurl 8.23, 5 ru
 | 40 × 8 KiB over 1 s | 378.9 ms | 160.7 ms | **-58%** |
 | 30 × delayed 300 ms | 100.5 ms | 47.8 ms | **-53%** |
 | 1 × 2 s + 35 fast/medium | 133.7 ms | 98.2 ms | -27% (fast responses settle at ~410 ms, long before the 2 s transfer ends) |
-| 8 × 8 MiB bulk | 207.6 ms | 215.6 ms | +4% (parity; wall time +1.5%) |
+| 8 × 8 MiB bulk | 207.6 ms | 215.6 ms | ≈parity in quiet runs; up to ~20% slower on a loaded machine (server-bound workload) |
 
 Tests: `tests/SharedMultiHandleTest.php`.
 
